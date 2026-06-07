@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Bbox Overlay</title>
+  <style>
+    :root {
+      --bg: #1a1a1a;
+      --fg: #e8e8e8;
+      --panel: #222;
+      --border: #333;
+      --accent: #5aa9e6;
+      --muted: #888;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; padding: 0; background: var(--bg); color: var(--fg); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { display: grid; grid-template-rows: auto 1fr; }
+    header {
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 14px; font-weight: 500; }
+    header .id { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    header button {
+      background: var(--panel);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    header button:hover:not(:disabled) { background: #2c2c2c; }
+    header button:disabled { opacity: 0.4; cursor: not-allowed; }
+    header label { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+    header input[type=number] {
+      width: 60px; padding: 2px 4px; background: #111; color: var(--fg);
+      border: 1px solid var(--border); border-radius: 3px;
+      color-scheme: dark;
+    }
+    header input[type=number]::-webkit-inner-spin-button,
+    header input[type=number]::-webkit-outer-spin-button {
+      filter: invert(1) grayscale(100%) brightness(0.3);
+      opacity: 1;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 200px 1fr 320px;
+      overflow: hidden;
+    }
+    .sidebar { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 8px 0; }
+    .sidebar .page-item {
+      padding: 6px 16px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sidebar .page-item:hover { background: #2c2c2c; }
+    .sidebar .page-item.active { background: #094771; color: #fff; }
+    .sidebar .page-item.empty { color: var(--muted); }
+    .sidebar .page-item.empty.active { color: #fff; }
+    .sidebar .page-item .count { color: var(--muted); font-size: 11px; }
+    .sidebar .page-item.active .count { color: #cce; }
+    .stage-wrap { overflow: auto; padding: 16px; background: #0f0f0f; display: flex; justify-content: center; align-items: flex-start; }
+    .stage {
+      position: relative;
+      display: inline-block;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+      background: white;
+    }
+    .stage img { display: block; width: 100%; height: auto; -webkit-user-drag: none; user-select: none; }
+    .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .stage svg rect.bbox { pointer-events: all; cursor: pointer; transition: fill-opacity 0.1s; }
+    .stage svg rect.bbox:hover { fill-opacity: 0.35 !important; }
+    .stage svg rect.bbox.selected { stroke-width: 4 !important; }
+    .stage svg text.label { font: bold 10px sans-serif; pointer-events: none; }
+    .info-panel { background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 12px; }
+    .info-panel h2 { margin: 0 0 8px; font-size: 13px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+    .info-panel .bbox-card {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .info-panel .bbox-card:hover { background: #2c2c2c; }
+    .info-panel .bbox-card.selected { border-color: var(--accent); background: #1e3a52; }
+    .info-panel .bbox-card .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .info-panel .bbox-card .swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 6px; vertical-align: middle; }
+    .info-panel .bbox-card .cn { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .info-panel .bbox-card .type { color: var(--muted); font-size: 11px; display: flex; align-items: center; gap: 6px; }
+    .info-panel .bbox-card .del-btn {
+      background: transparent;
+      color: #e85a5a;
+      border: 1px solid #e85a5a;
+      border-radius: 3px;
+      padding: 0 5px;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      opacity: 0.6;
+    }
+    .info-panel .bbox-card .del-btn:hover { opacity: 1; background: rgba(232,90,90,0.15); }
+    .info-panel .bbox-card .desc { color: #ccc; max-height: 4.5em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+    .info-panel .bbox-card .geom { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; margin-top: 4px; }
+    .info-panel .bbox-card .adj-form { margin-top: 6px; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+    .info-panel .bbox-card .adj-form input { width: 52px; padding: 2px 4px; background: #111; color: var(--fg); border: 1px solid var(--border); border-radius: 3px; font-size: 11px; }
+    .info-panel .bbox-card .adj-form button { padding: 2px 8px; background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .info-panel .bbox-card .adj-form button:hover:not(:disabled) { background: #2c2c2c; }
+    .info-panel .bbox-card .adj-form button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .info-panel .bbox-card .adj-form .adj-label { font-size: 10px; color: var(--muted); }
+    .info-panel .bbox-card .adj-status { font-size: 10px; margin-top: 2px; min-height: 14px; }
+    .info-panel .bbox-card .adj-status.ok { color: #5c5; }
+    .info-panel .bbox-card .adj-status.err { color: #e85a5a; }
+    .empty { color: var(--muted); padding: 24px; text-align: center; font-style: italic; }
+    .error { color: #e85a5a; padding: 24px; }
+    /* Draw mode */
+    .stage.drawing-mode { cursor: crosshair; }
+    .stage .draw-rect {
+      position: absolute;
+      border: 2px dashed var(--accent);
+      background: rgba(90, 169, 230, 0.15);
+      pointer-events: none;
+      z-index: 10;
+    }
+    #btn-draw-mode.active {
+      background: #1e3a52 !important;
+      border-color: var(--accent) !important;
+      color: var(--accent) !important;
+    }
+    /* New figure form in info panel */
+    .new-figure-form {
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      padding: 10px;
+      margin-bottom: 12px;
+      background: #1a2d3d;
+    }
+    .new-figure-form h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: var(--accent);
+    }
+    .new-figure-form .field {
+      margin-bottom: 8px;
+    }
+    .new-figure-form label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 2px;
+    }
+    .new-figure-form input[type="text"],
+    .new-figure-form select {
+      width: 100%;
+      padding: 3px 6px;
+      background: #111;
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .new-figure-form .candidates {
+      max-height: 120px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: #111;
+      margin-top: 4px;
+    }
+    .new-figure-form .candidate {
+      padding: 5px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      border-bottom: 1px solid #222;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .new-figure-form .candidate:last-child { border-bottom: none; }
+    .new-figure-form .candidate:hover { background: #1e3a52; }
+    .new-figure-form .candidate.selected {
+      background: #1e3a52;
+      color: var(--accent);
+    }
+    .new-figure-form .candidate .score {
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .new-figure-form .geom-display {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .new-figure-form .actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .new-figure-form .actions button {
+      flex: 1;
+      padding: 4px 8px;
+      background: var(--panel);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .new-figure-form .actions button.primary {
+      background: var(--accent);
+      color: #111;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .new-figure-form .actions button:hover:not(:disabled) { opacity: 0.85; }
+    .new-figure-form .actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .new-figure-form .status {
+      font-size: 10px;
+      margin-top: 4px;
+      min-height: 14px;
+    }
+    .new-figure-form .status.ok { color: #5c5; }
+    .new-figure-form .status.err { color: #e85a5a; }
+    /* Smart detect */
+    #btn-smart-detect { font-size: 13px; }
+    #btn-smart-detect.active { background: #1e3a52 !important; border-color: var(--accent) !important; color: var(--accent) !important; }
+    .recommendation-list { margin-bottom: 12px; }
+    .recommendation-list h3 { margin: 0 0 6px; font-size: 13px; color: var(--accent); }
+    .recommendation-list .stats { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .rec-card {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px;
+      margin-bottom: 6px;
+      font-size: 12px;
+      background: #1a1a1a;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .rec-card:hover { background: #222; }
+    .rec-card .rec-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .rec-card .rec-page { font-weight: 600; color: var(--accent); }
+    .rec-card .rec-score { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 600; }
+    .rec-card .rec-score.high { background: #1a3d1a; color: #5c5; }
+    .rec-card .rec-score.medium { background: #3d2e1a; color: #e6a23c; }
+    .rec-card .rec-score.low { background: #3d1a1a; color: #e85a5a; }
+    .rec-card .rec-text { color: #ccc; max-height: 3em; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .rec-card .rec-actions { display: flex; gap: 4px; margin-top: 6px; }
+    .rec-card .rec-actions button { flex: 1; padding: 3px 6px; background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .rec-card .rec-actions button:hover:not(:disabled) { background: #2c2c2c; }
+    .rec-card .rec-actions button.primary { background: var(--accent); color: #111; border-color: var(--accent); font-weight: 600; }
+    .rec-card .rec-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .rec-card.selected { border-color: #e6a23c; background: #2a2215; }
+    .recommendation-list .close-btn {
+      float: right;
+      font-size: 11px;
+      padding: 2px 8px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .recommendation-list .close-btn:hover { color: var(--fg); background: #2c2c2c; }
+    .recommendation-list + h2 {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    /* Stage overlay for smart detect */
+    .stage svg rect.smart-detect { pointer-events: all; cursor: pointer; }
+    .stage svg rect.smart-detect:hover { stroke-width: 3 !important; }
+    .stage svg rect.smart-detect.selected { stroke-width: 4 !important; }
+    .stage svg text.smart-detect-label { font: bold 10px sans-serif; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bbox Overlay · <span class="id" id="paper-id">—</span></h1>
+    <button id="prev-paper" title="上一篇 ([)">⟨⟨</button>
+    <button id="prev-page" title="上一页 (←)">←</button>
+    <span><input type="number" id="page-input" min="1" /> / <span id="page-total">—</span></span>
+    <button id="next-page" title="下一页 (→)">→</button>
+    <button id="next-paper" title="下一篇 (])">⟩⟩</button>
+    <label><input type="checkbox" id="toggle-body" checked> body_bbox（虚线）</label>
+    <label><input type="checkbox" id="toggle-label" checked> 编号标签</label>
+    <label><input type="checkbox" id="toggle-image"> 隐藏背景图</label>
+    <button id="btn-draw-mode" title="圈选新 Figure (D)">➕ 圈选</button>
+    <button id="btn-smart-detect" title="智能扫描漏检 (S)">🔍 扫描</button>
+    <span style="flex:1"></span>
+    <a id="back-link" href="/" style="color: var(--accent); text-decoration: none; font-size: 13px;">← 返回</a>
+  </header>
+  <main>
+    <aside class="sidebar" id="sidebar"></aside>
+    <section class="stage-wrap" id="stage-wrap">
+      <div class="empty" id="placeholder">加载中…</div>
+    </section>
+    <aside class="info-panel" id="info-panel"></aside>
+  </main>
+
+  <script>
+  (() => {
+    const params = new URLSearchParams(location.search);
+    let paperId = params.get('id');
+    let paperSource = params.get('source') || 'arxiv';
+    let currentPage = parseInt(params.get('page') || '0', 10);
+    const token = localStorage.getItem('authToken') || '';
+    const authHeaders = token ? { 'Authorization': 'Bearer ' + token } : {};
+
+    const $ = (id) => document.getElementById(id);
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const PLACEHOLDER_RE = /^(image|chart|table) on page/;
+
+    let overlayData = null;
+    let selectedIdx = null;
+    let neighbors = { prev: null, next: null };
+    let bboxAdjustments = {};
+
+    // Draw mode state
+    let drawMode = false;
+    let isDrawing = false;
+    let drawStart = null;      // {x, y} in PDF coords
+    let drawRectEl = null;     // the temporary div element while dragging
+    let pendingBodyBbox = null; // [x1, y1, x2, y2] after mouseup
+
+    // Smart detect state
+    let smartDetectRecommendations = [];
+    let selectedRecIdx = null;
+
+    if (!paperId) {
+      $('placeholder').textContent = '缺少 id 参数。用法：/static/overlay.html?id=<paper_id>&page=<n>';
+      $('placeholder').className = 'error';
+      return;
+    }
+    $('paper-id').textContent = paperId;
+    $('back-link').href = `/insight/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}`;
+
+    // Deterministic HSL hue per caption_number.
+    function hueFor(cn) {
+      if (!cn) return null;
+      let h = 0;
+      for (let i = 0; i < cn.length; i++) h = (h * 31 + cn.charCodeAt(i)) >>> 0;
+      return h % 360;
+    }
+    function colorFor(bb) {
+      const cn = bb.caption_number;
+      if (!cn) return '#888';
+      const h = hueFor(cn);
+      return `hsl(${h}, 70%, 55%)`;
+    }
+    function darkerColorFor(bb) {
+      const cn = bb.caption_number;
+      if (!cn) return '#555';
+      const h = hueFor(cn);
+      return `hsl(${h}, 70%, 35%)`;
+    }
+
+    function svgEl(name, attrs, text) {
+      const el = document.createElementNS(SVG_NS, name);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      if (text != null) el.textContent = text;
+      return el;
+    }
+
+    async function loadOverlay(edge) {
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/overlay`, { headers: authHeaders });
+        if (resp.status === 404) {
+          $('placeholder').textContent = '该论文尚未运行 MinerU 提取（缺 figures/{id}/mineru.json）';
+          $('placeholder').className = 'error';
+          return;
+        }
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        overlayData = await resp.json();
+      } catch (e) {
+        $('placeholder').textContent = `加载失败: ${e.message}`;
+        $('placeholder').className = 'error';
+        return;
+      }
+
+      if (!overlayData.pages.length) {
+        $('placeholder').textContent = '没有抽出任何图表。';
+        return;
+      }
+
+      renderSidebar();
+      const tp = overlayData.total_pages
+        || overlayData.pages[overlayData.pages.length - 1].page_idx + 1;
+      $('page-total').textContent = String(tp);
+
+      // Default page: URL param, then edge hint, then first page
+      if (!currentPage) {
+        if (edge === 'last') {
+          currentPage = tp;
+        } else {
+          currentPage = overlayData.pages[0].page_idx + 1;
+        }
+      }
+      goPage(currentPage);
+    }
+
+    async function loadNeighbors() {
+      try {
+        const res = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/insight-neighbors`, { headers: authHeaders });
+        if (!res.ok) { neighbors = { prev: null, next: null }; }
+        else neighbors = await res.json();
+      } catch (_) { neighbors = { prev: null, next: null }; }
+      updatePaperNavButtons();
+      // Refresh page-nav tooltips/disabled state in case neighbors arrived after first render
+      if (overlayData) updateNavButtons();
+    }
+
+    function updatePaperNavButtons() {
+      $('prev-paper').disabled = !neighbors.prev;
+      $('next-paper').disabled = !neighbors.next;
+      $('prev-paper').title = neighbors.prev ? `上一篇 ([): ${neighbors.prev.title}` : '上一篇 ([)';
+      $('next-paper').title = neighbors.next ? `下一篇 (]): ${neighbors.next.title}` : '下一篇 (])';
+    }
+
+    async function loadPaper(id, edge) {
+      if (!id || id === paperId) return;
+      paperId = id;
+      overlayData = null;
+      selectedIdx = null;
+      currentPage = 0;
+      $('paper-id').textContent = id;
+      $('back-link').href = `/insight/${encodeURIComponent(id)}`;
+      const url = new URL(location.href);
+      url.searchParams.set('id', id);
+      url.searchParams.delete('page');
+      history.replaceState({}, '', url);
+      // Reset main panels to a clean loading state
+      $('stage-wrap').innerHTML = '<div class="empty" id="placeholder">加载中…</div>';
+      $('info-panel').innerHTML = '';
+      $('sidebar').innerHTML = '';
+      $('page-total').textContent = '—';
+      $('page-input').value = '';
+      $('prev-paper').disabled = true;
+      $('next-paper').disabled = true;
+      await loadOverlay(edge);
+      await loadNeighbors();
+    }
+
+    function renderSidebar() {
+      const sb = $('sidebar');
+      sb.innerHTML = '';
+      for (const p of overlayData.pages) {
+        const item = document.createElement('div');
+        item.className = 'page-item';
+        const count = p.bboxes ? p.bboxes.length : 0;
+        if (count === 0) item.classList.add('empty');
+        item.dataset.page = String(p.page_idx + 1);
+        const countLabel = count > 0 ? `${count} 项` : '—';
+        item.innerHTML = `<span>Page ${p.page_idx + 1}</span><span class="count">${countLabel}</span>`;
+        item.addEventListener('click', () => goPage(p.page_idx + 1));
+        sb.appendChild(item);
+      }
+    }
+
+    function goPage(pageNum) {
+      const page = overlayData.pages.find(p => p.page_idx + 1 === pageNum);
+      if (!page) {
+        // Out of range. Backend returns every page in [0, total_pages); this
+        // branch only fires when the user typed an invalid page number.
+        $('stage-wrap').innerHTML = `<div class="empty" id="placeholder">Page ${pageNum} 超出范围 (1–${overlayData.total_pages || overlayData.pages.length})</div>`;
+        currentPage = pageNum;
+        $('page-input').value = String(pageNum);
+        updateNavButtons();
+        updateActiveSidebar();
+        return;
+      }
+      currentPage = pageNum;
+      selectedIdx = null;
+      $('page-input').value = String(pageNum);
+      const url = new URL(location.href);
+      url.searchParams.set('page', String(pageNum));
+      history.replaceState({}, '', url);
+
+      updateNavButtons();
+      updateActiveSidebar();
+      renderStage(page);
+      renderInfoPanel(page);
+    }
+
+    function updateNavButtons() {
+      const pages = overlayData.pages.map(p => p.page_idx + 1);
+      const minP = pages[0];
+      const maxP = pages[pages.length - 1];
+      const atFirst = currentPage <= minP;
+      const atLast = currentPage >= maxP;
+      $('prev-page').disabled = atFirst && !neighbors.prev;
+      $('next-page').disabled = atLast && !neighbors.next;
+      $('prev-page').title = atFirst && neighbors.prev
+        ? `跳到上一篇末页 (←): ${neighbors.prev.title}`
+        : '上一页 (←)';
+      $('next-page').title = atLast && neighbors.next
+        ? `跳到下一篇首页 (→): ${neighbors.next.title}`
+        : '下一页 (→)';
+    }
+
+    function updateActiveSidebar() {
+      for (const el of document.querySelectorAll('.page-item')) {
+        el.classList.toggle('active', parseInt(el.dataset.page, 10) === currentPage);
+      }
+    }
+
+    function renderStage(page) {
+      const wrap = $('stage-wrap');
+      wrap.innerHTML = '';
+      const stage = document.createElement('div');
+      stage.className = 'stage' + (drawMode ? ' drawing-mode' : '');
+      stage.addEventListener('mousedown', onStageMouseDown);
+      stage.addEventListener('mousemove', onStageMouseMove);
+      stage.addEventListener('mouseup', onStageMouseUp);
+      const img = document.createElement('img');
+      img.src = `/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/page/${page.page_idx + 1}`;
+      img.alt = `Page ${page.page_idx + 1}`;
+      img.draggable = false;
+      if ($('toggle-image').checked) img.style.opacity = '0';
+      stage.appendChild(img);
+
+      const [pw, ph] = page.page_size;
+      const svg = document.createElementNS(SVG_NS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${pw} ${ph}`);
+      svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
+
+      page.bboxes.forEach((bb, i) => {
+        const col = colorFor(bb);
+        const darkCol = darkerColorFor(bb);
+        const [x1, y1, x2, y2] = bb.bbox;
+        const w = x2 - x1, h = y2 - y1;
+
+        const rect = svgEl('rect', {
+          class: 'bbox',
+          x: x1, y: y1, width: w, height: h,
+          fill: col, 'fill-opacity': 0.18,
+          stroke: darkCol, 'stroke-width': 1.5,
+          'data-idx': i,
+        });
+        rect.addEventListener('click', (e) => { e.stopPropagation(); selectBbox(i); });
+        svg.appendChild(rect);
+
+        if ($('toggle-body').checked && bb.body_bbox) {
+          const [bx1, by1, bx2, by2] = bb.body_bbox;
+          svg.appendChild(svgEl('rect', {
+            class: 'body-bbox',
+            x: bx1, y: by1, width: bx2 - bx1, height: by2 - by1,
+            fill: 'none', stroke: darkCol, 'stroke-width': 0.8,
+            'stroke-dasharray': '3 2',
+            'pointer-events': 'none',
+            'data-body-idx': i,
+          }));
+        }
+
+        if ($('toggle-label').checked) {
+          const label = bb.caption_number || (PLACEHOLDER_RE.test(bb.desc) ? '∅' : '');
+          if (label) {
+            svg.appendChild(svgEl('text', {
+              class: 'label',
+              x: x1 + 4, y: y1 + 14, fill: darkCol,
+              'data-label-idx': i,
+            }, label));
+          }
+        }
+      });
+      // Render smart detect overlays for current page (use global index)
+      smartDetectRecommendations.forEach((rec, i) => {
+        if (rec.page_idx + 1 !== currentPage) return;
+        const [rx1, ry1, rx2, ry2] = rec.inferred_body_bbox;
+        const rw = rx2 - rx1, rh = ry2 - ry1;
+        const isSelected = selectedRecIdx === i;
+        const rect = svgEl('rect', {
+          class: 'smart-detect' + (isSelected ? ' selected' : ''),
+          x: rx1, y: ry1, width: rw, height: rh,
+          fill: 'none', stroke: '#e6a23c', 'stroke-width': isSelected ? 3 : 1.5,
+          'stroke-dasharray': '4 2',
+          'data-rec-idx': i,
+        });
+        rect.addEventListener('click', (e) => {
+          e.stopPropagation();
+          selectRec(i);
+        });
+        svg.appendChild(rect);
+        // Label
+        svg.appendChild(svgEl('text', {
+          class: 'smart-detect-label',
+          x: rx1 + 4, y: ry1 + 14, fill: '#e6a23c',
+        }, 'SD'));
+      });
+
+      stage.appendChild(svg);
+      wrap.appendChild(stage);
+    }
+
+    // ---- Smart detect functions --------------------------------------------
+
+    async function smartDetect() {
+      const btn = $('btn-smart-detect');
+      btn.disabled = true;
+      btn.textContent = '🔍 扫描中…';
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/smart-detect`, {
+          method: 'POST',
+          headers: authHeaders,
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        smartDetectRecommendations = data.recommendations || [];
+        selectedRecIdx = null;
+        showRecommendations();
+        // Re-render current stage to show overlays
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) renderStage(page);
+      } catch (e) {
+        alert(`Scan failed: ${e.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔍 扫描';
+      }
+    }
+
+    function showRecommendations() {
+      // If there are recommendations, prepend them to the info panel
+      const panel = $('info-panel');
+      // Check if recommendation list already exists
+      let recList = panel.querySelector('.recommendation-list');
+      if (recList) recList.remove();
+
+      if (smartDetectRecommendations.length === 0) return;
+
+      recList = document.createElement('div');
+      recList.className = 'recommendation-list';
+      const header = document.createElement('h3');
+      header.textContent = `${smartDetectRecommendations.length} suspected missed figure(s) found`;
+      recList.appendChild(header);
+
+      const btnRow = document.createElement('div');
+      btnRow.style.cssText = 'display:flex;gap:6px;margin-bottom:8px;';
+      const addAllBtn = document.createElement('button');
+      addAllBtn.className = 'close-btn';
+      addAllBtn.textContent = 'Add All';
+      addAllBtn.style.flex = '1';
+      addAllBtn.addEventListener('click', () => applyAllRecommendations(addAllBtn));
+      btnRow.appendChild(addAllBtn);
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'close-btn';
+      closeBtn.textContent = 'Close';
+      closeBtn.style.flex = '1';
+      closeBtn.addEventListener('click', () => {
+        smartDetectRecommendations = [];
+        selectedRecIdx = null;
+        recList.remove();
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) renderInfoPanel(page);
+      });
+      btnRow.appendChild(closeBtn);
+      recList.appendChild(btnRow);
+
+      smartDetectRecommendations.forEach((rec, i) => {
+        const card = document.createElement('div');
+        card.className = 'rec-card';
+        card.dataset.recIdx = String(i);
+        const scoreClass = rec.confidence >= 0.7 ? 'high' : (rec.confidence >= 0.4 ? 'medium' : 'low');
+        const scoreLabel = rec.confidence >= 0.7 ? 'High' : (rec.confidence >= 0.4 ? 'Med' : 'Low');
+        card.innerHTML = `
+          <div class="rec-header">
+            <span class="rec-page">Page ${rec.page_idx + 1}</span>
+            <span class="rec-score ${scoreClass}">${scoreLabel} ${(rec.confidence * 100).toFixed(0)}%</span>
+          </div>
+          <div class="rec-text">${escapeHTML(rec.caption_text)}</div>
+          <div class="rec-actions">
+            <button data-action="preview">Preview</button>
+            <button class="primary" data-action="apply">Add</button>
+            <button data-action="ignore">Ignore</button>
+          </div>
+        `;
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.rec-actions')) return;
+          goPage(rec.page_idx + 1);
+          selectRec(i);
+        });
+        card.querySelectorAll('.rec-actions button').forEach(b => {
+          b.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const action = e.target.dataset.action;
+            if (action === 'preview') {
+              goPage(rec.page_idx + 1);
+              selectRec(i);
+            } else if (action === 'apply') {
+              applyRecommendation(rec, i, e.target);
+            } else if (action === 'ignore') {
+              ignoreRecommendation(i);
+            }
+          });
+        });
+        recList.appendChild(card);
+      });
+
+      panel.insertBefore(recList, panel.firstChild);
+    }
+
+    function selectRec(idx) {
+      selectedRecIdx = idx;
+      document.querySelectorAll('.rec-card').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.recIdx, 10) === idx);
+      });
+      document.querySelectorAll('.stage svg rect.smart-detect').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.recIdx, 10) === idx);
+        el.setAttribute('stroke-width', parseInt(el.dataset.recIdx, 10) === idx ? '4' : '1.5');
+      });
+    }
+
+    async function applyRecommendation(rec, idx, btn) {
+      btn.disabled = true;
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/manual-figures`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({
+            page_idx: rec.page_idx,
+            body_bbox: rec.inferred_body_bbox,
+            caption_bbox: rec.caption_bbox,
+            caption_text: rec.caption_text,
+            content_type: 'image',
+          }),
+        });
+        if (!resp.ok) {
+          let reason = `HTTP ${resp.status}`;
+          try { const err = await resp.json(); if (err.reason) reason = err.reason; } catch (_) {}
+          throw new Error(reason);
+        }
+        // Remove from recommendations
+        smartDetectRecommendations.splice(idx, 1);
+        selectedRecIdx = null;
+        showRecommendations();
+        // Refresh overlay
+        await loadOverlay();
+        await loadBboxAdjustments();
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) {
+          renderStage(page);
+          renderInfoPanel(page);
+        }
+      } catch (e) {
+        alert(`Add failed: ${e.message}`);
+        btn.disabled = false;
+      }
+    }
+
+    async function applyAllRecommendations(btn) {
+      btn.disabled = true;
+      const total = smartDetectRecommendations.length;
+      const originalText = btn.textContent;
+      for (let i = 0; i < total; i++) {
+        btn.textContent = `Adding ${i + 1}/${total}…`;
+        const rec = smartDetectRecommendations[0];
+        try {
+          const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/manual-figures`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
+            body: JSON.stringify({
+              page_idx: rec.page_idx,
+              body_bbox: rec.inferred_body_bbox,
+              caption_bbox: rec.caption_bbox,
+              caption_text: rec.caption_text,
+              content_type: 'image',
+            }),
+          });
+          if (!resp.ok) {
+            let reason = `HTTP ${resp.status}`;
+            try { const err = await resp.json(); if (err.reason) reason = err.reason; } catch (_) {}
+            throw new Error(reason);
+          }
+          smartDetectRecommendations.splice(0, 1);
+        } catch (e) {
+          alert(`Add failed at ${i + 1}/${total}: ${e.message}`);
+          btn.disabled = false;
+          btn.textContent = originalText;
+          showRecommendations();
+          return;
+        }
+      }
+      selectedRecIdx = null;
+      showRecommendations();
+      await loadOverlay();
+      await loadBboxAdjustments();
+      const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+      if (page) {
+        renderStage(page);
+        renderInfoPanel(page);
+      }
+      btn.textContent = originalText;
+      btn.disabled = false;
+    }
+
+    function ignoreRecommendation(idx) {
+      smartDetectRecommendations.splice(idx, 1);
+      selectedRecIdx = null;
+      showRecommendations();
+      const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+      if (page) renderStage(page);
+    }
+
+    async function loadBboxAdjustments() {
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/bbox-adjustments`, { headers: authHeaders });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        bboxAdjustments = data.adjustments || {};
+      } catch (_) {
+        bboxAdjustments = {};
+      }
+      // Re-render info panel so saved adjustments appear in inputs
+      if (overlayData && currentPage) {
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) renderInfoPanel(page);
+      }
+    }
+
+    async function saveBboxAdjustment(name, btn) {
+      const card = btn.closest('.bbox-card');
+      const statusEl = card.querySelector('.adj-status');
+      const inputs = card.querySelectorAll('.adj-form input');
+      const [l, t, r, b] = Array.from(inputs).map(inp => parseFloat(inp.value) || 0);
+
+      btn.disabled = true;
+      statusEl.textContent = '保存中…';
+      statusEl.className = 'adj-status';
+
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/bbox-adjustments`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify({ name, left: l, top: t, right: r, bottom: b }),
+        });
+        if (!resp.ok) {
+          let reason = `HTTP ${resp.status}`;
+          try {
+            const err = await resp.json();
+            if (err.reason) reason = err.reason;
+          } catch (_) {}
+          throw new Error(reason);
+        }
+        statusEl.textContent = '已保存并重新生成';
+        statusEl.className = 'adj-status ok';
+        // Refresh overlay to show updated bboxes
+        await loadOverlay();
+        await loadBboxAdjustments();
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) {
+          renderStage(page);
+          renderInfoPanel(page);
+        }
+      } catch (e) {
+        statusEl.textContent = `失败: ${e.message}`;
+        statusEl.className = 'adj-status err';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function deleteManualFigure(name, btn) {
+      if (!confirm(`确定删除 ${name} 吗？`)) return;
+      const card = btn.closest('.bbox-card');
+      const statusEl = card.querySelector('.adj-status');
+      btn.disabled = true;
+      statusEl.textContent = '删除中…';
+      statusEl.className = 'adj-status';
+
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/manual-figures/${encodeURIComponent(name)}`, {
+          method: 'DELETE',
+          headers: authHeaders,
+        });
+        if (!resp.ok) {
+          let reason = `HTTP ${resp.status}`;
+          try { const err = await resp.json(); if (err.reason) reason = err.reason; } catch (_) {}
+          throw new Error(reason);
+        }
+        statusEl.textContent = '已删除';
+        statusEl.className = 'adj-status ok';
+        // Refresh overlay
+        await loadOverlay();
+        await loadBboxAdjustments();
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) {
+          renderStage(page);
+          renderInfoPanel(page);
+        }
+      } catch (e) {
+        statusEl.textContent = `删除失败: ${e.message}`;
+        statusEl.className = 'adj-status err';
+        btn.disabled = false;
+      }
+    }
+
+    function renderInfoPanel(page) {
+      const panel = $('info-panel');
+      // Preserve recommendation list across page changes
+      const recList = panel.querySelector('.recommendation-list');
+      panel.innerHTML = '';
+      if (recList) panel.appendChild(recList);
+
+      const title = document.createElement('h2');
+      title.textContent = `Page ${page.page_idx + 1} · ${page.bboxes.length} 项`;
+      panel.appendChild(title);
+
+      if (page.bboxes.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'empty';
+        hint.style.padding = '24px 0';
+        hint.style.textAlign = 'left';
+        hint.textContent = '此页未抽出任何图表。如果实际有图，说明 MinerU 漏检。';
+        panel.appendChild(hint);
+        return;
+      }
+
+      page.bboxes.forEach((bb, i) => {
+        const card = document.createElement('div');
+        card.className = 'bbox-card';
+        card.dataset.idx = String(i);
+        const cn = bb.caption_number || (PLACEHOLDER_RE.test(bb.desc) ? '∅ (orphan)' : '—');
+        const col = colorFor(bb);
+        const ib = bb.bbox.map(v => v.toFixed(1)).join(',');
+        const adj = bboxAdjustments[bb.name] || { left: 0, top: 0, right: 0, bottom: 0 };
+        const isManual = bb.name.startsWith('manual_fig_');
+        const deleteBtn = isManual ? `<button class="del-btn" data-name="${escapeHTML(bb.name)}" title="删除">×</button>` : '';
+        card.innerHTML = `
+          <div class="header">
+            <span><span class="swatch" style="background:${col}"></span><span class="cn">${cn}</span></span>
+            <span class="type">${bb.content_type}${deleteBtn}</span>
+          </div>
+          <div class="desc">${escapeHTML(bb.desc)}</div>
+          <div class="geom">bbox=[${ib}]</div>
+          <div class="adj-form">
+            <span class="adj-label">L</span><input type="number" step="0.5" value="${adj.left}" title="左">
+            <span class="adj-label">T</span><input type="number" step="0.5" value="${adj.top}" title="上">
+            <span class="adj-label">R</span><input type="number" step="0.5" value="${adj.right}" title="右">
+            <span class="adj-label">B</span><input type="number" step="0.5" value="${adj.bottom}" title="下">
+            <button data-name="${escapeHTML(bb.name)}">保存并重新生成</button>
+          </div>
+          <div class="adj-status"></div>
+        `;
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.adj-form')) return;
+          if (e.target.classList.contains('del-btn')) return;
+          selectBbox(i);
+        });
+        const inputs = card.querySelectorAll('.adj-form input');
+        inputs.forEach(inp => {
+          inp.addEventListener('input', () => {
+            const [l, t, r, b] = Array.from(inputs).map(i => parseFloat(i.value) || 0);
+            updateBboxPreview(i, l, t, r, b);
+          });
+        });
+        const btn = card.querySelector('.adj-form button');
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          saveBboxAdjustment(bb.name, btn);
+        });
+        const delBtn = card.querySelector('.del-btn');
+        if (delBtn) {
+          delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteManualFigure(bb.name, delBtn);
+          });
+        }
+        panel.appendChild(card);
+      });
+    }
+
+    function updateBboxPreview(idx, left, top, right, bottom) {
+      const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+      if (!page) return;
+      const bb = page.bboxes[idx];
+      if (!bb) return;
+
+      // overlayData bbox already includes previously saved adjustments.
+      // We must diff against the saved value to avoid double-applying.
+      const saved = bboxAdjustments[bb.name] || { left: 0, top: 0, right: 0, bottom: 0 };
+      const dx1 = left  - saved.left;
+      const dy1 = top   - saved.top;
+      const dx2 = right - saved.right;
+      const dy2 = bottom - saved.bottom;
+
+      const [ox1, oy1, ox2, oy2] = bb.bbox;
+      const nx1 = ox1 + dx1;
+      const ny1 = oy1 + dy1;
+      const nx2 = ox2 + dx2;
+      const ny2 = oy2 + dy2;
+
+      const rect = document.querySelector(`.stage svg rect.bbox[data-idx="${idx}"]`);
+      if (rect) {
+        rect.setAttribute('x', nx1);
+        rect.setAttribute('y', ny1);
+        rect.setAttribute('width', Math.max(0, nx2 - nx1));
+        rect.setAttribute('height', Math.max(0, ny2 - ny1));
+      }
+
+      if (bb.body_bbox) {
+        const [bx1, by1, bx2, by2] = bb.body_bbox;
+        const bodyRect = document.querySelector(`.stage svg rect.body-bbox[data-body-idx="${idx}"]`);
+        if (bodyRect) {
+          bodyRect.setAttribute('x', bx1 + dx1);
+          bodyRect.setAttribute('y', by1 + dy1);
+          bodyRect.setAttribute('width', Math.max(0, bx2 - bx1 + dx2 - dx1));
+          bodyRect.setAttribute('height', Math.max(0, by2 - by1 + dy2 - dy1));
+        }
+      }
+
+      const label = document.querySelector(`.stage svg text.label[data-label-idx="${idx}"]`);
+      if (label) {
+        label.setAttribute('x', nx1 + 4);
+        label.setAttribute('y', ny1 + 14);
+      }
+
+      const card = document.querySelector(`.info-panel .bbox-card[data-idx="${idx}"]`);
+      if (card) {
+        const geom = card.querySelector('.geom');
+        if (geom) {
+          geom.textContent = `bbox=[${nx1.toFixed(1)},${ny1.toFixed(1)},${nx2.toFixed(1)},${ny2.toFixed(1)}]`;
+        }
+      }
+    }
+
+    function selectBbox(idx) {
+      selectedIdx = idx;
+      for (const el of document.querySelectorAll('.stage svg rect.bbox')) {
+        el.classList.toggle('selected', parseInt(el.dataset.idx, 10) === idx);
+      }
+      for (const el of document.querySelectorAll('.info-panel .bbox-card')) {
+        el.classList.toggle('selected', parseInt(el.dataset.idx, 10) === idx);
+        if (parseInt(el.dataset.idx, 10) === idx) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      }
+    }
+
+    function escapeHTML(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+    }
+
+    // ---- Draw mode ----------------------------------------------------------
+
+    function toggleDrawMode() {
+      drawMode = !drawMode;
+      const btn = $('btn-draw-mode');
+      btn.classList.toggle('active', drawMode);
+      btn.textContent = drawMode ? '➕ 圈选中…' : '➕ 圈选';
+      const stage = document.querySelector('.stage');
+      if (stage) stage.classList.toggle('drawing-mode', drawMode);
+      if (!drawMode) cancelDraw();
+    }
+
+    $('btn-draw-mode').addEventListener('click', toggleDrawMode);
+
+    function cancelDraw() {
+      isDrawing = false;
+      drawStart = null;
+      pendingBodyBbox = null;
+      if (drawRectEl) {
+        drawRectEl.remove();
+        drawRectEl = null;
+      }
+    }
+
+    function screenToPdfCoords(stage, clientX, clientY) {
+      const rect = stage.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+      if (!page) return { x: 0, y: 0 };
+      const [pw, ph] = page.page_size;
+      const pdfX = (x / rect.width) * pw;
+      const pdfY = (y / rect.height) * ph;
+      return { x: pdfX, y: pdfY };
+    }
+
+    function onStageMouseDown(e) {
+      if (!drawMode) return;
+      // Ignore clicks on existing bboxes
+      if (e.target.classList.contains('bbox')) return;
+      e.preventDefault();
+      isDrawing = true;
+      const stage = e.currentTarget;
+      const coords = screenToPdfCoords(stage, e.clientX, e.clientY);
+      drawStart = coords;
+
+      drawRectEl = document.createElement('div');
+      drawRectEl.className = 'draw-rect';
+      stage.appendChild(drawRectEl);
+      updateDrawRect(coords, coords);
+    }
+
+    function onStageMouseMove(e) {
+      if (!drawMode || !isDrawing || !drawStart) return;
+      const stage = document.querySelector('.stage');
+      if (!stage) return;
+      const coords = screenToPdfCoords(stage, e.clientX, e.clientY);
+      updateDrawRect(drawStart, coords);
+    }
+
+    function onStageMouseUp(e) {
+      if (!drawMode || !isDrawing || !drawStart) return;
+      isDrawing = false;
+      const stage = document.querySelector('.stage');
+      if (!stage) return;
+      const end = screenToPdfCoords(stage, e.clientX, e.clientY);
+      const x1 = Math.min(drawStart.x, end.x);
+      const y1 = Math.min(drawStart.y, end.y);
+      const x2 = Math.max(drawStart.x, end.x);
+      const y2 = Math.max(drawStart.y, end.y);
+      const bodyBbox = [x1, y1, x2, y2];
+      pendingBodyBbox = bodyBbox;
+
+      if (drawRectEl) {
+        drawRectEl.remove();
+        drawRectEl = null;
+      }
+
+      // Auto-exit draw mode and fetch candidates
+      toggleDrawMode();
+      fetchCaptionCandidates(bodyBbox);
+    }
+
+    // Global mouseup to catch releases outside the stage
+    window.addEventListener('mouseup', (e) => {
+      if (isDrawing) onStageMouseUp(e);
+    });
+
+    function updateDrawRect(start, end) {
+      if (!drawRectEl) return;
+      const stage = drawRectEl.parentElement;
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+      if (!page) return;
+      const [pw, ph] = page.page_size;
+      const sx = (start.x / pw) * rect.width;
+      const sy = (start.y / ph) * rect.height;
+      const ex = (end.x / pw) * rect.width;
+      const ey = (end.y / ph) * rect.height;
+      const left = Math.min(sx, ex);
+      const top = Math.min(sy, ey);
+      const width = Math.abs(ex - sx);
+      const height = Math.abs(ey - sy);
+      drawRectEl.style.left = left + 'px';
+      drawRectEl.style.top = top + 'px';
+      drawRectEl.style.width = width + 'px';
+      drawRectEl.style.height = height + 'px';
+    }
+
+    async function fetchCaptionCandidates(bodyBbox) {
+      const pageIdx = currentPage - 1;
+      const bboxStr = bodyBbox.map(v => v.toFixed(1)).join(',');
+      const panel = $('info-panel');
+      panel.innerHTML = '<div class="empty">正在匹配 caption…</div>';
+
+      try {
+        const resp = await fetch(
+          `/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/page/${pageIdx + 1}/caption-candidates?body_bbox=${bboxStr}`,
+          { headers: authHeaders }
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        showNewFigureForm(bodyBbox, data.candidates || []);
+      } catch (e) {
+        showNewFigureForm(bodyBbox, []);
+      }
+    }
+
+    function showNewFigureForm(bodyBbox, candidates) {
+      const panel = $('info-panel');
+      const [x1, y1, x2, y2] = bodyBbox;
+
+      let candidateHTML = '';
+      if (candidates.length > 0) {
+        candidateHTML = '<div class="candidates">' +
+          candidates.map((c, i) => `
+            <div class="candidate ${i === 0 ? 'selected' : ''}" data-idx="${i}" data-bbox="${c.bbox.join(',')}" data-text="${escapeHTML(c.text)}">
+              <span>${escapeHTML(c.text)}</span>
+              <span class="score">${(c.score * 100).toFixed(0)}%</span>
+            </div>
+          `).join('') +
+          '</div>';
+      } else {
+        candidateHTML = '<div class="candidates"><div class="candidate selected" data-idx="-1" data-bbox="" data-text="">（无候选，请手动输入）</div></div>';
+      }
+
+      panel.innerHTML = `
+        <div class="new-figure-form" id="new-figure-form">
+          <h3>新建 Figure</h3>
+          <div class="geom-display">body_bbox=[${x1.toFixed(1)},${y1.toFixed(1)},${x2.toFixed(1)},${y2.toFixed(1)}]</div>
+          <div class="field">
+            <label>类型</label>
+            <select id="mf-type">
+              <option value="image">image</option>
+              <option value="table">table</option>
+              <option value="chart">chart</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Caption 候选（点击选择）</label>
+            ${candidateHTML}
+          </div>
+          <div class="field">
+            <label>Caption 文本（可编辑）</label>
+            <input type="text" id="mf-caption" value="${escapeHTML(candidates[0]?.text || '')}" placeholder="Fig. X: description">
+          </div>
+          <div class="actions">
+            <button id="mf-cancel">取消</button>
+            <button class="primary" id="mf-save">保存</button>
+          </div>
+          <div class="status" id="mf-status"></div>
+        </div>
+      `;
+
+      // Candidate click handlers
+      document.querySelectorAll('#new-figure-form .candidate').forEach(el => {
+        el.addEventListener('click', () => {
+          document.querySelectorAll('#new-figure-form .candidate').forEach(c => c.classList.remove('selected'));
+          el.classList.add('selected');
+          $('mf-caption').value = el.dataset.text;
+        });
+      });
+
+      $('mf-cancel').addEventListener('click', () => {
+        pendingBodyBbox = null;
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) renderInfoPanel(page);
+      });
+
+      $('mf-save').addEventListener('click', () => {
+        const selected = document.querySelector('#new-figure-form .candidate.selected');
+        const captionText = $('mf-caption').value.trim();
+        let captionBbox = null;
+        if (selected && selected.dataset.idx !== '-1' && selected.dataset.bbox) {
+          const parts = selected.dataset.bbox.split(',').map(Number);
+          if (parts.length === 4) captionBbox = parts;
+        }
+        saveManualFigure({
+          page_idx: currentPage - 1,
+          body_bbox: bodyBbox,
+          caption_bbox: captionBbox,
+          caption_text: captionText || 'Manual figure',
+          content_type: $('mf-type').value,
+        });
+      });
+    }
+
+    async function saveManualFigure(data) {
+      const statusEl = $('mf-status');
+      const btn = $('mf-save');
+      btn.disabled = true;
+      statusEl.textContent = '保存中…';
+      statusEl.className = 'status';
+
+      try {
+        const resp = await fetch(`/api/papers/${encodeURIComponent(paperSource)}/${encodeURIComponent(paperId)}/manual-figures`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify(data),
+        });
+        if (!resp.ok) {
+          let reason = `HTTP ${resp.status}`;
+          try { const err = await resp.json(); if (err.reason) reason = err.reason; } catch (_) {}
+          throw new Error(reason);
+        }
+        const result = await resp.json();
+        statusEl.textContent = `已保存: ${result.name}`;
+        statusEl.className = 'status ok';
+        pendingBodyBbox = null;
+        // Refresh overlay to show new figure
+        await loadOverlay();
+        await loadBboxAdjustments();
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) {
+          renderStage(page);
+          renderInfoPanel(page);
+        }
+      } catch (e) {
+        statusEl.textContent = `失败: ${e.message}`;
+        statusEl.className = 'status err';
+        btn.disabled = false;
+      }
+    }
+
+    // Navigation handlers
+    $('prev-page').addEventListener('click', () => {
+      const pages = overlayData.pages.map(p => p.page_idx + 1);
+      const prev = [...pages].reverse().find(p => p < currentPage);
+      if (prev) { goPage(prev); return; }
+      if (neighbors.prev) loadPaper(neighbors.prev.id, 'last');
+    });
+    $('next-page').addEventListener('click', () => {
+      const pages = overlayData.pages.map(p => p.page_idx + 1);
+      const next = pages.find(p => p > currentPage);
+      if (next) { goPage(next); return; }
+      if (neighbors.next) loadPaper(neighbors.next.id, 'first');
+    });
+    $('prev-paper').addEventListener('click', () => {
+      if (neighbors.prev) loadPaper(neighbors.prev.id, 'first');
+    });
+    $('next-paper').addEventListener('click', () => {
+      if (neighbors.next) loadPaper(neighbors.next.id, 'first');
+    });
+    $('page-input').addEventListener('change', (e) => {
+      const n = parseInt(e.target.value, 10);
+      if (n > 0) goPage(n);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (isDrawing) return;
+      if (e.shiftKey && e.key === 'ArrowLeft') {
+        // Skip to previous page with figures within the same paper
+        const figs = overlayData.pages.filter(p => p.bboxes.length > 0).map(p => p.page_idx + 1);
+        const prev = [...figs].reverse().find(p => p < currentPage);
+        if (prev) goPage(prev);
+        return;
+      }
+      if (e.shiftKey && e.key === 'ArrowRight') {
+        const figs = overlayData.pages.filter(p => p.bboxes.length > 0).map(p => p.page_idx + 1);
+        const next = figs.find(p => p > currentPage);
+        if (next) goPage(next);
+        return;
+      }
+      if (e.key === 'ArrowLeft') $('prev-page').click();
+      else if (e.key === 'ArrowRight') $('next-page').click();
+      else if (e.key === '[') $('prev-paper').click();
+      else if (e.key === ']') $('next-paper').click();
+      else if (e.key === 'd' || e.key === 'D') toggleDrawMode();
+      else if (e.key === 's' || e.key === 'S') smartDetect();
+    });
+    // Re-render stage when toggles change
+    for (const id of ['toggle-body', 'toggle-label', 'toggle-image']) {
+      $(id).addEventListener('change', () => {
+        const page = overlayData.pages.find(p => p.page_idx + 1 === currentPage);
+        if (page) renderStage(page);
+      });
+    }
+
+    $('btn-smart-detect').addEventListener('click', smartDetect);
+
+    $('prev-paper').disabled = true;
+    $('next-paper').disabled = true;
+    (async () => {
+      await loadOverlay();
+      await loadNeighbors();
+      await loadBboxAdjustments();
+    })();
+  })();
+  </script>
+</body>
+</html>

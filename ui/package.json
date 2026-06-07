@@ -1,0 +1,19 @@
+{
+  "name": "ripple-reader-ui",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "marked": "^15.0.0",
+    "katex": "0.16.9",
+    "prismjs": "1.29.0",
+    "prettier": "2.8.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  },
+  "scripts": {
+    "build:pseudocode": "esbuild pseudocode.js/pseudocode.js --bundle --minify --format=iife --global-name=pseudocode --external:katex --outfile=../static/pseudocode.min.js",
+    "build": "npm run build:pseudocode && esbuild src/main.js --bundle --minify --format=iife --sourcemap --outfile=../static/app.js && esbuild node_modules/prismjs/prism.js --minify --format=iife --global-name=Prism --outfile=../static/vendor/prism.min.js && node scripts/copy-vendor.js",
+    "watch": "esbuild src/main.js --bundle --format=iife --sourcemap --watch --outfile=../static/app.js"
+  }
+}

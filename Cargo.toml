@@ -1,0 +1,61 @@
+[package]
+name = "ripple-reader"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+default-run = "ripple-reader"
+
+[[bin]]
+name = "redo_mineru"
+path = "src/bin/redo_mineru.rs"
+
+[[bin]]
+name = "mdfmt"
+path = "src/bin/mdfmt.rs"
+
+[[bin]]
+name = "warmup_insight_cache"
+path = "src/bin/warmup_insight_cache.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dotenvy = "0.15"
+chrono = "0.4"
+feed-rs = "2"
+tempfile = "3"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+log = "0.4"
+futures = "0.3"
+rand = "0.8"
+regex = "1"
+urlencoding = "2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "json", "migrate"] }
+axum = "0.8"
+sha1 = "0.10"
+bcrypt = "0.15"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "compression-gzip", "set-header"] }
+http-body-util = "0.1"
+base64 = "0.22"
+zip = "2.2"
+walkdir = "2"
+pdfium-render = { version = "0.8" }
+image = "0.25"
+clap = { version = "4", features = ["derive"] }
+eventsource-stream = "0.2"
+tiktoken-rs = "0.7.0"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+notify = "7"
+indicatif = "0.18.4"
+indicatif-log-bridge = "0.2.3"
+env_logger = "0.11.10"
+quick-xml = "0.40.1"
+cron = "0.15"
+ammonia = "4.1.2"

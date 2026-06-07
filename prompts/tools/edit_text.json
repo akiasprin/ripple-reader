@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "edit_text",
+    "description": "精确修改正文中的某段文本。old_text 必须是原文中一字不差的片段。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "old_text": {
+          "type": "string",
+          "description": "原文中需要被替换的精确文本片段，必须一字不差，且在整个正文中只出现一次。注意：原文是 Markdown 格式，old_text 必须保留选中文字周围的 Markdown 标记（如 *斜体*、**粗体**、`` 代码 ``、[链接](url) 等），确保它是原文的精确子串。"
+        },
+        "new_text": {
+          "type": "string",
+          "description": "替换后的新文本"
+        },
+        "explanation": {
+          "type": "string",
+          "description": "对修改的解释说明"
+        }
+      },
+      "required": ["old_text", "new_text", "explanation"]
+    }
+  }
+}

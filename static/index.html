@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Ripple</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='10' fill='%232563eb'/%3E%3Ccircle cx='50' cy='50' r='25' fill='none' stroke='%232563eb' stroke-width='8' stroke-linecap='round'/%3E%3Ccircle cx='50' cy='50' r='40' fill='none' stroke='%232563eb' stroke-width='5' stroke-dasharray='25 12' stroke-linecap='round' opacity='0.5'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/vendor/katex.min.css?v=__ASSET_VER__">
+<script src="/static/vendor/katex.min.js?v=__ASSET_VER__"></script>
+<script src="/static/vendor/auto-render.min.js?v=__ASSET_VER__"></script>
+<link rel="stylesheet" href="/static/pseudocode.min.css?v=__ASSET_VER__">
+<link id="prism-light" rel="stylesheet" href="/static/vendor/prism-latte.css?v=__ASSET_VER__">
+<link id="prism-dark" rel="stylesheet" href="/static/vendor/prism-macchiato.css?v=__ASSET_VER__" disabled>
+<script src="/static/vendor/prism.min.js?v=__ASSET_VER__"></script>
+<script src="/static/vendor/prism-autoloader.min.js?v=__ASSET_VER__"></script>
+<script>
+// Configure Prism autoloader to find language components
+(function() {
+    if (typeof Prism !== 'undefined' && Prism.plugins && Prism.plugins.autoloader) {
+        Prism.plugins.autoloader.languages_path = '/static/vendor/prism-components/';
+    }
+})();
+</script>
+<script src="/static/vendor/prettier-standalone.js?v=__ASSET_VER__"></script>
+<link rel="stylesheet" href="/static/style.css?v=__ASSET_VER__">
+<script>(function(){const s=localStorage.getItem('theme'),d=window.matchMedia('(prefers-color-scheme:dark)');const t=s||(d.matches?'dark':'light');document.documentElement.dataset.theme=t;const m=document.createElement('meta');m.name='theme-color';m.content=t==='dark'?'#18181b':'#f5f6f8';document.head.appendChild(m);})()</script>
+<script>
+// Pre-fetch paper list in parallel with app.js download.
+// Results are stashed in window.__initialData__ for the app to consume on boot.
+(function(){
+  var path = window.location.pathname;
+  if (path !== '/' && path !== '/index.html' && !path.startsWith('/?')) return;
+  const params = new URLSearchParams(window.location.search);
+  const qs = new URLSearchParams(params);
+  qs.set('page', params.get('page') || '1');
+  qs.set('page_size', '10');
+  window.__initialData__ = fetch('/api/papers?' + qs.toString())
+    .then(function(r){ return r.json(); })
+    .catch(function(){ return null; });
+})();
+</script>
+</head>
+<body>
+<div id="insightProgressPanel" class="progress-panel">
+  <button class="panel-collapse-btn" onclick="app.toggleProgressCollapse()" title="收起">&times;</button>
+  <div id="progressAnalyzingSection">
+    <div class="progress-panel-header"><div class="spinner"></div><span>处理中</span><span class="badge" id="progressBadge">0</span></div>
+    <div class="progress-titles" id="progressTitles"></div>
+  </div>
+  <div class="progress-completed-header" id="progressCompletedHeader" style="display:none;"><span class="completed-dot"></span>最近完成</div>
+  <div class="progress-titles" id="progressCompletedTitles"></div>
+</div>
+<div id="progressBar" class="progress-bar" title="展开进度"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--progress-icon-color)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><defs><clipPath id="flaskInner"><path d="M9 8l-3.2 10h12.4l-3.2-10z"/></clipPath></defs><g clip-path="url(#flaskInner)"><rect class="flask-fill" x="-10" y="24" width="44" height="48" fill="var(--progress-fill-color)" stroke="none"/></g><path d="M9 3v5l-4 10h14l-4-10V3"/><path d="M7 3h10"/><path d="M5 18h14"/></svg></div>
+<div class="container">
+  <header>
+    <div class="header-top">
+      <h1 onclick="window.location.href='/'" title="回到首页"><span style="display:flex;align-items:center;gap:10px;"><svg width="28" height="28" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="2.5" fill="var(--accent)" stroke="none"/><circle cx="12" cy="12" r="6" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><circle cx="12" cy="12" r="9.5" stroke="var(--accent)" stroke-width="2" stroke-dasharray="16 8" stroke-linecap="round" opacity="0.5"/><circle cx="12" cy="12" r="11.5" stroke="var(--accent)" stroke-width="1" stroke-dasharray="8 8" stroke-linecap="round" opacity="0.25"/></svg><span>Ripple</span></span></h1>
+      <div class="header-top-right">
+        <div class="header-actions">
+          <div class="header-search-wrap">
+            <span class="header-icon" onclick="app.toggleSearch()" title="搜索">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            </span>
+            <div class="search-panel" id="searchPanel">
+              <input type="text" id="searchInput" placeholder="搜索标题、摘要或总结..." value="" onfocus="app.openSearch()">
+              <button onclick="app.search()">搜索</button>
+            </div>
+          </div>
+          <span class="header-icon" id="themeToggle" onclick="app.toggleTheme()" title="切换主题">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+          </span>
+          <div class="header-auth-wrap">
+            <span class="header-icon" id="authToggle" onclick="app.toggleAuth()" title="认证">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </span>
+            <div class="auth-panel" id="authPanel">
+              <input type="password" id="authInput" placeholder="输入密码..." value="" onfocus="app.openAuth()" onkeydown="if(event.key==='Enter')app.login()">
+              <button onclick="app.login()">登录</button>
+            </div>
+          </div>
+        </div>
+        <span class="header-divider">|</span>
+        <div class="header-nav-icons">
+        <a href="/" id="navHome" class="header-icon active" title="论文">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        </a>
+        <a href="/tags" id="navTags" class="header-icon" title="主题" style="display:none;">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+        </a>
+        <a href="/dates" id="navDates" class="header-icon" title="日期">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        </a>
+        <span class="header-divider" id="navAdminDivider" style="display:none">|</span>
+        <a href="/admin" id="navAdmin" class="header-icon" title="设置" target="_blank" rel="noopener noreferrer">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </a>
+        </div>
+      </div>
+    </div>
+    <div class="header-bottom">
+      <p>浏览、搜索并管理已处理的论文数据</p>
+    </div>
+  </header>
+  <div class="filter-bar" id="filterBar">
+    <button class="active" data-filter="" onclick="app.setMarkFilter('')">全部</button>
+    <button data-filter="critical" onclick="app.setMarkFilter('critical')">关键</button>
+    <button data-filter="supporting" onclick="app.setMarkFilter('supporting')">参考</button>
+    <button data-filter="marginal" onclick="app.setMarkFilter('marginal')">边缘</button>
+    <button data-filter="none" onclick="app.setMarkFilter('none')">未标签</button>
+    <div class="filter-dropdown" id="filterDropdown">
+      <button class="filter-dropdown-btn" onclick="app.toggleFilterDropdown()">
+        <span id="filterDropdownLabel">筛选排序</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="filter-dropdown-menu" id="filterDropdownMenu">
+        <div class="filter-dropdown-section">排序</div>
+        <div class="filter-dropdown-option" data-sort="published:desc" onclick="app.onSortOptionClick(this)">
+          <span>发表日期 ↓</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-option" data-sort="published:asc" onclick="app.onSortOptionClick(this)">
+          <span>发表日期 ↑</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-option" data-sort="score:desc" onclick="app.onSortOptionClick(this)">
+          <span>评分 ↓</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-option" data-sort="score:asc" onclick="app.onSortOptionClick(this)">
+          <span>评分 ↑</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-divider"></div>
+        <div class="filter-dropdown-section">来源</div>
+        <div class="filter-dropdown-option" data-source="arxiv" onclick="app.onSourceOptionClick(this)">
+          <span>arXiv</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-option" data-source="openreview" onclick="app.onSourceOptionClick(this)">
+          <span>OpenReview</span>
+          <svg class="check-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="filter-dropdown-divider"></div>
+        <label class="filter-dropdown-check" id="insightFilterCheckDropdown" onclick="event.stopPropagation(); app.toggleInsightFilter()" data-state="off">
+          <span class="check-box"></span>
+          <span class="check-label">LLM 解读：全部</span>
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div id="list" class="paper-list"></div>
+  <div id="pagination" class="pagination"></div>
+  <div id="tagsPage" class="tags-page"></div>
+  <div id="datesPage" class="dates-page"></div>
+  <div id="insightPage" class="insight-page"></div>
+</div>
+
+<div id="insightOverlay" class="insight-overlay dialog-overlay" onclick="if (event.target === this) app.cancelInsightDialog()">
+  <div class="insight-dialog dialog" id="insightDialog">
+    <div class="insight-dialog-header dialog-header">
+      <h3 id="insightDialogTitle">深度分析</h3>
+      <button class="close-btn dialog-close-btn" onclick="app.cancelInsightDialog()">×</button>
+    </div>
+    <div class="insight-dialog-body dialog-body">
+      <div class="insight-dialog-toolbar">
+        <div class="insight-provider-select" id="insightProviderSelect" style="display:none;">
+          <label>模型</label>
+          <select id="insightProviderDropdown"></select>
+        </div>
+        <div class="insight-dialog-field">
+          <label>拆分</label>
+          <input id="insightDialogSplitFigures" type="text" placeholder="F:7,F:8">
+        </div>
+        <div class="insight-dialog-checks">
+          <span class="insight-dialog-checks-label">可选</span>
+          <label class="insight-dialog-check">
+            <input type="checkbox" id="insightDialogAutoReview">
+            <span>Review</span>
+          </label>
+          <label class="insight-dialog-check">
+            <input type="checkbox" id="insightDialogSkipValidation">
+            <span>跳过图表验证</span>
+          </label>
+          <label class="insight-dialog-check">
+            <input type="checkbox" id="insightDialogKeepCaption">
+            <span>保留 Caption</span>
+          </label>
+        </div>
+      </div>
+      <div class="insight-dialog-error" id="insightDialogError"></div>
+      <textarea id="insightDialogPrompt" placeholder="输入自定义 prompt，留空使用默认..."></textarea>
+      <div class="insight-dialog-meta" id="insightDialogMeta">
+        <span class="insight-prompt-hint" id="insightPromptHint"></span>
+        <div class="insight-dialog-actions">
+          <button class="btn-secondary" onclick="app.cancelInsightDialog()">取消</button>
+          <button class="btn-primary" id="insightDialogSubmit" onclick="app.generateInsight()">生成</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="reviewOverlay" class="insight-overlay dialog-overlay" onclick="if (event.target === this) app.cancelReview()">
+  <div class="insight-dialog dialog" id="reviewDialog">
+    <div class="insight-dialog-header dialog-header">
+      <h3 id="reviewDialogTitle">审查 Insight</h3>
+      <button class="close-btn dialog-close-btn" onclick="app.cancelReview()">×</button>
+    </div>
+    <div class="insight-dialog-body dialog-body">
+      <div class="insight-dialog-toolbar">
+        <div class="insight-provider-select" id="reviewProviderSelect" style="display:none;">
+          <label>模型</label>
+          <select id="reviewProviderDropdown"></select>
+        </div>
+      </div>
+      <div class="insight-dialog-meta" id="reviewDialogMeta">
+        <span class="insight-prompt-hint" id="reviewPromptHint"></span>
+        <div class="insight-dialog-actions">
+          <button class="btn-secondary" onclick="app.cancelReview()">取消</button>
+          <button class="btn-primary" id="reviewDialogSubmit" onclick="app.submitReview()">审查</button>
+        </div>
+      </div>
+      <textarea id="reviewDialogPrompt" placeholder="输入自定义 review prompt，留空使用默认..."></textarea>
+    </div>
+  </div>
+</div>
+
+
+<div id="imageLightbox" class="image-lightbox" onclick="if (event.target === this) app.hideImageLightbox()">
+  <button class="image-lightbox-close" onclick="app.hideImageLightbox()" aria-label="关闭">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+  </button>
+  <div class="image-lightbox-content">
+    <img id="lightboxImage" src="" alt="">
+    <div class="image-lightbox-caption" id="lightboxCaption"></div>
+  </div>
+  <div class="image-lightbox-actions">
+    <button class="image-lightbox-comment-btn" onclick="app.onLightboxCommentClick()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+      添加批注
+    </button>
+  </div>
+</div>
+
+<div id="replyOverlay" class="insight-overlay dialog-overlay" onclick="if (event.target === this) app.hideReplyModal()">
+  <div class="dialog" style="max-width:720px">
+    <div class="dialog-header">
+      <h3 id="replyDialogTitle">AI 回复</h3>
+      <button class="close-btn dialog-close-btn" onclick="app.hideReplyModal()">×</button>
+    </div>
+    <div class="dialog-body" id="replyDialogBody" style="font-size:14px;line-height:1.7"></div>
+  </div>
+</div>
+
+<div id="orphanDrawer" class="orphan-drawer">
+  <div class="orphan-drawer-header">
+    <h3 id="orphanDrawerTitle">孤立论文</h3>
+    <button class="orphan-drawer-close" onclick="app.hideOrphanPanel()">&times;</button>
+  </div>
+  <div class="orphan-drawer-body" id="orphanDrawerBody"></div>
+  <div class="orphan-drawer-footer" id="orphanDrawerFooter"></div>
+</div>
+<div id="orphanOverlay" class="orphan-overlay" onclick="app.hideOrphanPanel()"></div>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<div id="selectionTooltip" class="selection-tooltip">
+  <div class="selection-tooltip-btn" onclick="app.onAddCommentClick()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+    添加批注
+  </div>
+  <div class="selection-tooltip-divider"></div>
+  <div class="selection-tooltip-btn" onclick="app.onAiReviseClick()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+    使用魔法
+  </div>
+</div>
+
+<div id="mobileSelectionBar" class="mobile-selection-bar">
+  <div class="mobile-selection-bar-inner">
+    <div class="mobile-selection-bar-btn primary" onclick="app.showMobileCommentEditor('manual')">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+      添加批注
+    </div>
+    <div class="mobile-selection-bar-btn" onclick="app.onAiReviseClick()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      使用魔法
+    </div>
+  </div>
+</div>
+
+<div id="mobileCommentEditor" class="mobile-comment-editor">
+  <div class="mobile-comment-editor-header">
+    <button class="mobile-comment-editor-cancel" onclick="app.hideMobileCommentEditor()">取消</button>
+    <span class="mobile-comment-editor-title">添加批注</span>
+    <button class="mobile-comment-editor-submit" onclick="app.submitMobileComment()">提交</button>
+  </div>
+  <div class="mobile-comment-editor-quote" id="mobileCommentEditorQuote"></div>
+  <textarea id="mobileCommentEditorInput" class="mobile-comment-editor-input" placeholder="输入批注内容..." rows="6"></textarea>
+  <div class="mobile-comment-editor-hint">以 @AGENT 开头可向 AI 提问</div>
+</div>
+
+<div id="commentsToggleBtn" class="comments-bar" onclick="app.showCommentsPanel()" title="显示批注">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+</div>
+
+<div id="spotlightOverlay" class="spotlight-overlay" onclick="app.closeSpotlight()"></div>
+<script src="/static/pseudocode.min.js?v=__ASSET_VER__"></script>
+<script src="/static/app.js?v=__ASSET_VER__"></script>
+</body>
+</html>

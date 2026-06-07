@@ -1,0 +1,73 @@
+# =============================================================================
+# Ripple Reader - Docker Compose
+# =============================================================================
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose up -d --build  # Rebuild and start
+#   docker compose logs -f app    # Follow app logs
+#   docker compose down -v        # Stop and remove volumes
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and fill in your API keys
+#   2. Update DATABASE_URL in .env to: postgres://ripple:ripple@db:5432/ripple_reader
+# =============================================================================
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: ripple-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ripple
+      POSTGRES_PASSWORD: ripple
+      POSTGRES_DB: ripple_reader
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ripple -d ripple_reader"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ripple-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ripple-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL to use the db service
+      DATABASE_URL: postgres://ripple:ripple@db:5432/ripple_reader
+      # Ensure web server binds to all interfaces inside the container
+      WEB_PORT: "8181"
+    ports:
+      - "8181:8181"
+    volumes:
+      # Mount prompts and static for live editing (optional)
+      - ./prompts:/app/prompts:ro
+      - ./static:/app/static:ro
+      # Data directory for any runtime file storage
+      - app_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ripple-net
+    command: ["web", "8181"]
+
+volumes:
+  postgres_data:
+    driver: local
+  app_data:
+    driver: local
+
+networks:
+  ripple-net:
+    driver: bridge
