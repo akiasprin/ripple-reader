@@ -259,7 +259,6 @@ impl Processor {
             "model": self.model,
             "messages": openai_messages,
             "max_completion_tokens": self.max_tokens,
-            "temperature": self.temperature,
         });
         let body_obj = body.as_object_mut().unwrap();
 
@@ -750,7 +749,6 @@ impl Processor {
             "model": self.model,
             "messages": anthropic_messages,
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
             "stream": true,
         });
         if let Some(sp) = system_prompt {

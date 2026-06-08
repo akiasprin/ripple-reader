@@ -39,7 +39,6 @@ async fn test_llm_with_specific_paper() -> Result<()> {
         provider.api_keys,
         provider.model,
         provider.max_tokens,
-        0.7f32,
         provider.reasoning_effort,
         provider.output_config_effort,
         None,
