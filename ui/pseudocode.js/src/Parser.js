@@ -220,6 +220,14 @@ Parser.prototype._parseAlgorithmInner = function () {
             continue;
         }
 
+        // Also accept INPUT/OUTPUT/REQUIRE/ENSURE outside algorithmic
+        // (common in LaTeX algorithmicx papers, e.g. \INPUT before \begin{algorithmic})
+        var ioStmt = this._parseStatement(IO_STATEMENTS);
+        if (ioStmt) {
+            algNode.addChild(ioStmt);
+            continue;
+        }
+
         break;
     }
     return algNode;

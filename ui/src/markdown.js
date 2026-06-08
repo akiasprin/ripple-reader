@@ -143,6 +143,8 @@ export const markdown = {
           //    comment (commentRegex = /^(%|\/\/).*/ skips everything to EOL,
           //    which would swallow the closing } in \textit{// ...}).
           normalized = normalized.replace(/\/\//g, '  ');
+          // 3. Strip \hfill which pseudocode.js renders as unsightly <br/>hfill.
+          normalized = normalized.replace(/\\hfill\b/g, ' ');
           return pseudocode.renderToString(normalized, {
             mathRenderer: function(expr, displayMode) {
               return displayMode ? '$$' + expr + '$$' : '$' + expr + '$';
