@@ -304,6 +304,35 @@ export const bootstrap = {
       const el = document.getElementById('swipeHint');
       if (el) el.classList.remove('visible', 'ready');
     };
+    // Swipe gradient overlays (created once, reused)
+    this._ensureSwipeOverlays = () => {
+      if (document.getElementById('swipeOverlayLeft')) return;
+      const left = document.createElement('div');
+      left.id = 'swipeOverlayLeft';
+      document.body.appendChild(left);
+      const right = document.createElement('div');
+      right.id = 'swipeOverlayRight';
+      document.body.appendChild(right);
+    };
+    this._updateSwipeOverlay = (dir, progress) => {
+      this._ensureSwipeOverlays();
+      const left = document.getElementById('swipeOverlayLeft');
+      const right = document.getElementById('swipeOverlayRight');
+      if (!left || !right) return;
+      left.classList.remove('visible');
+      right.classList.remove('visible');
+      if (!dir) return;
+      // dir 'prev' means dragging right → show left edge overlay
+      // dir 'next' means dragging left  → show right edge overlay
+      const el = dir === 'prev' ? left : right;
+      if (progress > 0.15) el.classList.add('visible');
+    };
+    this._hideSwipeOverlays = () => {
+      const left = document.getElementById('swipeOverlayLeft');
+      const right = document.getElementById('swipeOverlayRight');
+      if (left) left.classList.remove('visible');
+      if (right) right.classList.remove('visible');
+    };
 
     // Record touch position early so selectionchange can use it even if touchend fires later
     const _insideBody = (target) => {
@@ -313,18 +342,18 @@ export const bootstrap = {
     document.addEventListener('touchstart', (e) => {
       if (!this.insightPageId) return;
       if (this.isDesktopViewport()) return;
-      if (!_insideBody(e.target)) { delete this._swipeStart; return; }
+      if (!_insideBody(e.target) || e.target.closest('table')) { delete this._swipeStart; return; }
       const touch = e.changedTouches[0];
       this._touchPos = { x: touch.clientX, y: touch.clientY };
       this._swipeStart = { x: touch.clientX, y: touch.clientY, t: Date.now() };
     }, { passive: true });
     document.addEventListener('touchmove', (e) => {
-      if (!this._swipeStart || this._swipeHintActive) return;
+      if (!this._swipeStart) return;
       if (this.insightPageEditing) return;
       // Throttle to one frame (passive handler, non-blocking)
       if (this._swipeRafId) return;
       this._swipeRafId = requestAnimationFrame(() => { this._swipeRafId = null; });
-      if (!_insideBody(e.target)) return;
+      if (!_insideBody(e.target) || e.target.closest('table')) return;
       const tag = (e.target?.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
       const touch = e.changedTouches[0];
@@ -340,8 +369,10 @@ export const bootstrap = {
         const dir = dx > 0 ? 'prev' : 'next';
         const progress = Math.min(absDx / 50, 1);
         this._updateSwipeHint(dir, progress);
+        this._updateSwipeOverlay(dir, progress);
       } else {
         this._hideSwipeHint();
+        this._hideSwipeOverlays();
       }
     }, { passive: true });
     document.addEventListener('touchend', (e) => {
@@ -357,7 +388,7 @@ export const bootstrap = {
       if (ss && !this.insightPageEditing) {
         const tag = (e.target?.tagName || '').toLowerCase();
         const skip = tag === 'input' || tag === 'textarea' || tag === 'select';
-        if (!skip && !e.target.closest('#insightCommentsPanel') && !e.target.closest('#mobileCommentEditor') && !e.target.closest('#mobileSelectionBar')) {
+        if (!skip && !e.target.closest('#insightCommentsPanel') && !e.target.closest('#mobileCommentEditor') && !e.target.closest('#mobileSelectionBar') && !e.target.closest('table')) {
           const dx = touch.clientX - ss.x;
           const dy = touch.clientY - ss.y;
           const dt = Date.now() - ss.t;
@@ -369,11 +400,13 @@ export const bootstrap = {
             if (dx > 0 && this.insightNeighbors.prev) {
               this.showInsightPage(this.insightNeighbors.prev.id, this.insightNeighbors.prev.source_type);
               this._hideSwipeHint();
+              this._hideSwipeOverlays();
               delete this._swipeStart;
               return;
             } else if (dx < 0 && this.insightNeighbors.next) {
               this.showInsightPage(this.insightNeighbors.next.id, this.insightNeighbors.next.source_type);
               this._hideSwipeHint();
+              this._hideSwipeOverlays();
               delete this._swipeStart;
               return;
             }
@@ -382,6 +415,7 @@ export const bootstrap = {
       }
       delete this._swipeStart;
       this._hideSwipeHint();
+      this._hideSwipeOverlays();
 
       // Delay to let the system finish updating the selection
       setTimeout(() => handleMobileSelection('touchend'), 400);

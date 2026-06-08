@@ -11,15 +11,13 @@ export const dialogs = {
     overlay.classList.add('open');
 
     // Lock body scroll when dialog opens to prevent scroll-chaining on mobile.
-    // We use position:fixed with top offset (saved scroll position) because
-    // overflow:hidden alone is unreliable on iOS Safari.
+    // On iOS Safari, position:fixed body combined with the soft keyboard causes
+    // coordinate-mapping bugs that make dialog buttons untappable, so we only
+    // use overflow:hidden. The fixed overlay already blocks all touch events.
     const isMobile = !this.isDesktopViewport();
     if (isMobile) {
       const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
       document.documentElement.style.overflow = 'hidden';
-      document.body.style.position = 'fixed';
-      document.body.style.width = '100%';
-      document.body.style.top = `-${scrollY}px`;
       dialog._bodyScrollLocked = true;
       dialog._savedScrollY = scrollY;
     }
@@ -55,9 +53,6 @@ export const dialogs = {
       if (dialog._bodyScrollLocked) {
         const scrollY = dialog._savedScrollY || 0;
         document.documentElement.style.overflow = '';
-        document.body.style.position = '';
-        document.body.style.width = '';
-        document.body.style.top = '';
         window.scrollTo(0, scrollY);
         delete dialog._bodyScrollLocked;
         delete dialog._savedScrollY;

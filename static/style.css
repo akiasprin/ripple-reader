@@ -923,15 +923,6 @@ header p { color: var(--text2); font-size: 14px; }
   cursor: pointer; transition: opacity .2s;
 }
 .backup-restore-btn:hover { opacity: 0.82; }
-.backup-view-btn {
-  padding: 4px 10px; font-size: 12px; font-weight: 500; white-space: nowrap;
-  background: transparent; color: var(--accent);
-  border: 1px solid var(--accent); border-radius: 4px;
-  cursor: pointer; transition: all .2s;
-}
-.backup-view-btn:hover {
-  background: var(--accent); color: #fff;
-}
 .backup-delete-btn {
   padding: 4px 10px; font-size: 12px; font-weight: 500; white-space: nowrap;
   background: var(--bg); color: var(--text3);
@@ -2202,3 +2193,19 @@ body::before {
 #swipeHint .arrow-body { stroke: #fff; stroke-width: 2; stroke-linecap: round; }
 #swipeHint .arrow-head { stroke: #fff; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
 #swipeHint .hint-label { white-space: nowrap; }
+
+/* === Mobile swipe gradient overlays === */
+#swipeOverlayLeft, #swipeOverlayRight {
+  position: fixed; top: 0; bottom: 0; width: 40vw; max-width: 280px;
+  pointer-events: none; z-index: 150;
+  opacity: 0; transition: opacity 0.25s ease;
+}
+#swipeOverlayLeft {
+  left: 0;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 10%, transparent) 0%, transparent 100%);
+}
+#swipeOverlayRight {
+  right: 0;
+  background: linear-gradient(-90deg, color-mix(in srgb, var(--accent) 10%, transparent) 0%, transparent 100%);
+}
+#swipeOverlayLeft.visible, #swipeOverlayRight.visible { opacity: 1; }

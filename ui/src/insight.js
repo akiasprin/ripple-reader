@@ -426,7 +426,8 @@ export const insight = {
       <span class="meta-icon-group">
         ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" class="meta-icon" title="${p.source_type === 'arxiv' ? 'arXiv' : 'OpenReview'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ''}
         <a href="/static/overlay.html?source=${encodeURIComponent(p.source_type || 'arxiv')}&id=${this.escape(p.id)}" target="_blank" class="meta-icon" title="bbox"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg></a>
-        ${isBusy && this.authenticated ? `<span class="meta-icon" title="取消分析" onclick="app.cancelInsight('${this.escape(p.id)}')">${iconCancel}</span>` : ''}
+        ${p.insight === '__ANALYZING__' && this.authenticated ? `<span class="meta-icon" title="取消分析" onclick="app.cancelInsight('${this.escape(p.id)}')">${iconCancel}</span>` : ''}
+        ${p.insight_review === '__REVIEWING__' && this.authenticated ? `<span class="meta-icon" title="取消审核" onclick="app.cancelReviewTask('${this.escape(p.id)}')">${iconCancel}</span>` : ''}
         ${!isChecked && canEdit ? `<span class="meta-icon" title="生成" onclick="app.regenerateInsight('${this.escape(p.id)}', event)">${iconMoonshot}</span>` : ''}
         ${!isChecked && canEdit ? `<a href="/insight/${encodeURIComponent(p.source_type || 'arxiv')}/${p.id.split('/').map(encodeURIComponent).join('/')}/edit" class="meta-icon" title="编辑" onclick="if (event.metaKey || event.ctrlKey) return true; event.preventDefault(); app.editInsight();">${iconEdit}</a>` : ''}
         ${!isChecked && canEdit ? `<span class="meta-icon" title="审查" onclick="app.reviewInsight('${this.escape(p.id)}', event)">${iconReview}</span>` : ''}
@@ -476,7 +477,7 @@ export const insight = {
         <div class="insight-loading-state small">
           <div style="display:inline-block;width:20px;height:20px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:8px;"></div>
           <br>审核后台运行中，请稍候...
-          <br><button class="btn-secondary" style="margin-top:12px;" onclick="app.cancelReviewTask('${this.escapeJsArg(p.id)}')">取消审核</button>
+          <br><button class="btn-secondary" style="margin-top:12px;" onclick="app.cancelReviewTask('${this.escape(p.id)}')">取消审核</button>
         </div>
       </div>
     ` : (p.insight_review ? `
@@ -522,7 +523,6 @@ export const insight = {
         <div id="commentFormArea"></div>
       </div>`;
     const tInner0 = performance.now();
-    const oldBody = document.getElementById('insightPageBody');
     document.getElementById('insightPage').innerHTML = html;
     const newBody = document.getElementById('insightPageBody');
     console.log('[perf]   innerHTML set:', (performance.now() - tInner0).toFixed(0), 'ms');

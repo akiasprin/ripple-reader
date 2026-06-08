@@ -154,7 +154,7 @@ export const dates = {
       const markColorVal = p.mark && markColor[p.mark] ? markColor[p.mark] : '';
       const markHtml = markLabel ? `<span style="font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;background:rgba(0,0,0,0.04);color:${markColorVal};">${markLabel}</span>` : '';
       return `
-        <div class="dates-paper-card" onclick="app.showInsightPage('${this.escapeJsArg(p.id)}', '${this.escapeJsArg(p.source_type || 'arxiv')}')">
+        <div class="dates-paper-card" onclick="app.showInsightPage('${this.escape(p.id)}', '${this.escape(p.source_type || 'arxiv')}')">
           <div class="dates-paper-title">${this.escape(p.title)}</div>
           <div class="dates-paper-meta">
             <span>${this.escape(authors)}</span>
