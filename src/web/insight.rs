@@ -1069,6 +1069,7 @@ pub(crate) async fn toggle_checked(
     Ok(Json(PaperResponse::from_db(paper, mark, tags)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review_analysis(
     state: Arc<AppState>,
     processor: Arc<Processor>,
@@ -1560,6 +1561,94 @@ pub(crate) async fn delete_insight_backup(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+pub(crate) async fn format_insight(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_source, id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !check_auth(&headers, &state.auth_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let paper = match state.db.get_paper(&id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            warn!("[format_insight] Failed to fetch paper {}: {}", id, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    if paper.checked_at.is_some() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let markdown = &paper.insight;
+    if markdown.is_empty() || markdown == "__ANALYZING__" {
+        return Ok(Json(serde_json::json!({
+            "changed": false,
+            "message": "No insight content to format"
+        })));
+    }
+
+    let paper_id = format!("{}/{}", paper.source_type, paper.id);
+    let (new_md, _results) = crate::mdfmt::transform(&paper_id, markdown, false);
+
+    let changed = new_md != *markdown;
+    if !changed {
+        return Ok(Json(serde_json::json!({
+            "changed": false,
+            "message": "No changes needed"
+        })));
+    }
+
+    // Backup before overwriting
+    let insight_processed_at_str = paper
+        .insight_processed_at
+        .as_ref()
+        .map(|dt| dt.to_rfc3339());
+    let insight_reviewed_at_str = paper
+        .insight_reviewed_at
+        .as_ref()
+        .map(|dt| dt.to_rfc3339());
+    if let Err(e) = state
+        .db
+        .backup_insight(
+            &id,
+            &paper.insight,
+            insight_processed_at_str.as_deref(),
+            &paper.insight_review,
+            insight_reviewed_at_str.as_deref(),
+        )
+        .await
+    {
+        warn!("[format_insight] Failed to backup insight for {}: {}", id, e);
+    }
+
+    let updates = DbPaperUpdate {
+        insight: Some(new_md.clone()),
+        ..Default::default()
+    };
+    if let Err(e) = state.db.update_paper(&id, &updates).await {
+        error!("[format_insight] Failed to save paper {}: {}", id, e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Refresh HTML cache with newly formatted insight content
+    super::insight_html::refresh_insight_html_cache(
+        &state.db,
+        &paper.source_type,
+        &id,
+        &new_md,
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "changed": true,
+        "message": "Insight formatted successfully"
+    })))
 }
 
 pub(crate) async fn clear_all_insights(

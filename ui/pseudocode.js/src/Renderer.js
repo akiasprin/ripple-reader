@@ -1,6 +1,7 @@
 /*
 * */
 var utils = require('./utils');
+var ParseError = require('./ParseError');
 
 /*
  * TextStyle - used by TextEnvironment class to handle LaTeX text-style
@@ -112,7 +113,7 @@ TextStyle.prototype.updateByCommand = function (cmd) {
         return;
     }
 
-    throw new ParserError('Unrecognized `text-style` command');
+    throw new ParseError('Unrecognized `text-style` command');
 };
 
 TextStyle.prototype.toCSS = function () {
@@ -239,6 +240,31 @@ TextEnvironment.prototype.renderToHTML = function (backend) {
                     var rightEnv = new TextEnvironment(remainingNodes, this._textStyle);
                     this._html.putHTML(rightEnv.renderToHTML(backend));
                     this._html.putHTML('</span>');
+                }
+                break;
+            case 'math-symbol':
+                // LaTeX math symbols rendered outside $...$ math mode.
+                // Map common commands to their Unicode equivalents.
+                var mathSymbolMap = {
+                    'gets': '←', 'leftarrow': '←', 'rightarrow': '→',
+                    'leftrightarrow': '↔', 'to': '→', 'mapsto': '↦',
+                    'leq': '≤', 'geq': '≥', 'neq': '≠', 'approx': '≈',
+                    'equiv': '≡', 'in': '∈', 'notin': '∉',
+                    'subset': '⊂', 'supset': '⊃', 'subseteq': '⊆', 'supseteq': '⊇',
+                    'cup': '∪', 'cap': '∩', 'emptyset': '∅',
+                    'infty': '∞', 'cdot': '·', 'times': '×', 'div': '÷',
+                    'pm': '±', 'mp': '∓',
+                    'lfloor': '⌊', 'rfloor': '⌋', 'lceil': '⌈', 'rceil': '⌉',
+                    'langle': '⟨', 'rangle': '⟩',
+                    'dots': '…', 'ldots': '…', 'cdots': '⋯',
+                    'vdots': '⋮', 'ddots': '⋱',
+                };
+                var mathSymbol = mathSymbolMap[text];
+                if (mathSymbol !== undefined) {
+                    this._html.putText(mathSymbol);
+                } else {
+                    // Fallback: render as LaTeX command text (e.g. \sqrt, \frac)
+                    this._html.putText('\\' + text);
                 }
                 break;
             case 'quote-symbol':
@@ -815,10 +841,13 @@ Renderer.prototype._buildTree = function (node) {
                 'for': 'for',
                 'forall': 'for all',
                 'while': 'while',
+                'loop': 'loop',
             };
             this._typeKeyword(`${displayLoopName[loopType]} `);
-            var loopCond = node.children[0];
-            this._buildTree(loopCond);
+            if (loopType !== 'loop') {
+                var loopCond = node.children[0];
+                this._buildTree(loopCond);
+            }
             this._typeKeyword(' do');
 
             // <block>
@@ -833,7 +862,10 @@ Renderer.prototype._buildTree = function (node) {
                 //      <span class="ps-keyword">end for</span>
                 // </p>
                 this._newLine();
-                var endLoopName = loopType === 'while' ? 'end while' : 'end for';
+                var endLoopName = {
+                    'while': 'end while',
+                    'loop': 'end loop',
+                }[loopType] || 'end for';
                 this._typeKeyword(endLoopName);
             }
             break;

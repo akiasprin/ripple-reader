@@ -1552,6 +1552,10 @@ pub async fn run_server(
             "/api/papers/{source}/{id}/insight-backups/{backup_id}",
             delete(insight::delete_insight_backup),
         )
+        .route(
+            "/api/papers/{source}/{id}/format-insight",
+            post(insight::format_insight),
+        )
         .route("/api/prompts", get(get_prompts))
         .route(
             "/api/insight-providers",

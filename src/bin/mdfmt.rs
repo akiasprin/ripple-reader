@@ -96,6 +96,31 @@ async fn run_db_mode(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Backup current insight before overwriting.
+/// Returns Ok(()) on success; propagates errors so the caller can
+/// decide whether it's safe to proceed with the write.
+async fn backup_paper_insight(
+    db: &Db,
+    paper: &ripple_reader::db::types::DbPaper,
+) -> Result<()> {
+    let insight_processed_at_str = paper
+        .insight_processed_at
+        .as_ref()
+        .map(|dt| dt.to_rfc3339());
+    let insight_reviewed_at_str =
+        paper.insight_reviewed_at.as_ref().map(|dt| dt.to_rfc3339());
+    db.backup_insight(
+        &paper.id,
+        &paper.insight,
+        insight_processed_at_str.as_deref(),
+        &paper.insight_review,
+        insight_reviewed_at_str.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to backup insight for {}", paper.id))?;
+    Ok(())
+}
+
 async fn run_db_single(id: &str, write: bool, force: bool) -> Result<()> {
     let cfg = Config::from_env().context("Failed to load config")?;
     let db = Db::new(&cfg.database_url)
@@ -122,6 +147,11 @@ async fn run_db_single(id: &str, write: bool, force: bool) -> Result<()> {
     if changed {
         if write {
             let mut updated = paper;
+
+            // Backup current insight before overwriting.
+            backup_paper_insight(&db, &updated).await?;
+            println!("  [BACKUP] Saved pre-mdfmt snapshot");
+
             updated.insight = new_md;
             db.save_paper(&updated)
                 .await
@@ -173,6 +203,10 @@ async fn run_db_all(write: bool, force: bool) -> Result<()> {
 
             if write {
                 let mut updated = paper;
+
+                // Backup current insight before overwriting.
+                backup_paper_insight(&db, &updated).await?;
+
                 updated.insight = new_md;
                 db.save_paper(&updated)
                     .await

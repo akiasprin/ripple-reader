@@ -85,6 +85,22 @@ var mathPattern = {
                     continue;
                 }
 
+                // For '$' delimiter: if the candidate end '$' is immediately
+                // followed by another '$', it's likely a nested expression
+                // like $W \gets \Call{..}{$q$, $ep$}$ where the inner '$'
+                // is not the real closer.  Skip and keep looking.
+                // NOTE: '$' followed by '\' (e.g. `$x$\text{foo}`) is a
+                // real close — the backslash starts a new command, not math.
+                if (endDel === '$' && pos + 1 < remain.length) {
+                    var nextChar = remain.charAt(pos + 1);
+                    if (nextChar === '$') {
+                        var skipLen2 = pos + endDel.length;
+                        remain = remain.slice(skipLen2);
+                        endPos += skipLen2;
+                        continue;
+                    }
+                }
+
                 // For display math delimiters ($$, \[\]), keep delimiters in
                 // match[0] so the renderer can detect display mode.
                 var isDisplay = startDel === '$$' || startDel === '\\[';

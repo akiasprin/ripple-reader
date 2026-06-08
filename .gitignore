@@ -17,6 +17,6 @@
 /target
 /text/
 /ui/node_modules/
-AGENT.md
+AGENTS.md
 Cargo.lock
 .gstack/

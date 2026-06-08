@@ -1503,6 +1503,70 @@ impl MinerUClient {
                                     continue;
                                 }
 
+                                // Column-boundary guard: skip absorption when
+                                // a detected column boundary sits in the gap
+                                // between the figure body and the text block.
+                                // In two-column papers (e.g. 1608.05343), the
+                                // figure body may slightly overshoot the column
+                                // boundary (body_right=301, boundary=297.5), so
+                                // checking "which side of the boundary" fails.
+                                // Instead we check if the boundary is between
+                                // the two edges that form the h_gap.
+                                let cols = page_columns
+                                    .get(&page.page_idx)
+                                    .map(|v| v.as_slice());
+                                if let Some(cols) = cols {
+                                    let crosses = cols.iter().any(|&b| {
+                                        // Check if the column boundary
+                                        // separates the figure body from the
+                                        // text block.  Two cases:
+                                        //
+                                        // 1) Boundary in the gap ±4pt between
+                                        //    body and block edges.
+                                        let lo =
+                                            body_right.min(block_left) - 4.0;
+                                        let hi =
+                                            body_right.max(block_left) + 4.0;
+                                        if b > lo && b < hi {
+                                            return true;
+                                        }
+                                        // 2) The body straddles or slightly
+                                        //    overshoots the boundary (common
+                                        //    when MinerU bbox extends a few
+                                        //    pt past the column gutter), and
+                                        //    the block sits clearly past it.
+                                        let body_past =
+                                            body_right > b
+                                                && body_left < b;
+                                        let block_past =
+                                            block_left - b > 3.0;
+                                        let block_past_rev =
+                                            b - block_right > 3.0;
+                                        body_past
+                                            && (block_past || block_past_rev)
+                                    });
+                                    if crosses {
+                                        pp_info(&format!(
+                                            "[mineru] side-text absorption \
+                                             blocked by column boundary \
+                                             for figure {:?} on page {}: \
+                                             body=[{:.1},{:.1},{:.1},{:.1}] \
+                                             block=[{:.1},{:.1},{:.1},{:.1}]",
+                                            c.caption_number,
+                                            page.page_idx + 1,
+                                            body_left,
+                                            body_top,
+                                            body_right,
+                                            body_bottom,
+                                            block_left,
+                                            block_top,
+                                            block_right,
+                                            block_bottom,
+                                        ));
+                                        continue;
+                                    }
+                                }
+
                                 // Must be short — not a full paragraph.
                                 if block_height > 60.0 {
                                     continue;

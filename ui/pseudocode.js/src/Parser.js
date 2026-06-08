@@ -31,6 +31,7 @@
  *
  *     <for>           :== \FOR{<cond>} <block> \ENDFOR
  *     <while>         :== \WHILE{<cond>} <block> \ENDWHILE
+ *     <loop>          :== \LOOP <block> \ENDLOOP
  *     <repeat>        :== \REPEAT <block> \UNTIL{<cond>}
  *     <upon>          :== \UPON{<cond>} <block> \EDNUPON
  *
@@ -370,20 +371,38 @@ Parser.prototype._parseIf = function () {
 };
 
 Parser.prototype._parseLoop = function () {
-    if (!this._lexer.accept('func', ['FOR', 'FORALL', 'WHILE'])) return null;
+    if (!this._lexer.accept('func', ['FOR', 'FORALL', 'WHILE', 'LOOP'])) return null;
 
     var loopName = this._lexer.get().text.toLowerCase();
     var loopNode = new ParseNode('loop', loopName);
 
-    // { <cond> } <block>
-    this._lexer.expect('open');
-    loopNode.addChild(this._parseCond());
-    this._lexer.expect('close');
+    if (loopName === 'loop') {
+        // \LOOP has no condition
+        loopNode.addChild(new ParseNode('close-text'));
+    } else {
+        // { <cond> } <block>
+        this._lexer.expect('open');
+        loopNode.addChild(this._parseCond());
+        this._lexer.expect('close');
+    }
     loopNode.addChild(this._parseBlock());
 
-    // \ENDFOR
+    // \ENDFOR / \ENDWHILE / \ENDLOOP
     var endLoop = loopName !== 'forall' ? `end${loopName}` : 'endfor';
-    this._lexer.expect('func', endLoop);
+    try {
+        this._lexer.expect('func', endLoop);
+    } catch (e) {
+        // Tolerant fallback: some algorithms use mismatched end tags
+        var altEnds = ['endwhile', 'endfor', 'endloop', 'endif'];
+        var matched = false;
+        for (var i = 0; i < altEnds.length; i++) {
+            if (this._lexer.accept('func', altEnds[i])) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) throw e;
+    }
 
     return loopNode;
 };
@@ -426,10 +445,11 @@ Parser.prototype._parseUpon = function () {
 };
 
 var IO_STATEMENTS = ['ensure', 'require', 'input', 'output'];
-var STATEMENTS = ['state', 'print', 'return',
+var STATEMENTS = ['state', 'statex', 'print', 'return', 'let', 'assert',
     // LaTeX font commands that can appear at the block level
     'textbf', 'textit', 'textsf', 'texttt', 'textup', 'textsc', 'textsl',
-    'textnormal', 'textrm', 'uppercase', 'lowercase', 'textmd', 'textlf'];
+    'textnormal', 'textrm', 'uppercase', 'lowercase',
+    'textmd', 'textlf', 'text', 'emph'];
 Parser.prototype._parseStatement = function (acceptStatements) {
     if (!this._lexer.accept('func', acceptStatements)) return null;
 
@@ -535,6 +555,15 @@ var ACCEPTED_TOKEN_BY_ATOM = {
     'cond-symbol': {
         tokenType: 'func',
         tokenValues: ['and', 'or', 'not', 'true', 'false', 'to', 'downto'],
+    },
+    'math-symbol': {
+        tokenType: 'func',
+        tokenValues: ['gets', 'leftarrow', 'rightarrow', 'leftrightarrow', 'to',
+            'mapsto', 'leq', 'geq', 'neq', 'approx', 'equiv', 'in', 'notin',
+            'subset', 'supset', 'subseteq', 'supseteq', 'cup', 'cap', 'emptyset',
+            'infty', 'cdot', 'times', 'div', 'pm', 'mp', 'lfloor', 'rfloor',
+            'lceil', 'rceil', 'langle', 'rangle', 'dots', 'ldots', 'cdots',
+            'vdots', 'ddots', 'sqrt', 'frac', 'mathrm', 'mathcal', 'mathbb'],
     },
     'quote-symbol': {
         tokenType: 'quote',

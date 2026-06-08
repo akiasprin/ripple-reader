@@ -370,6 +370,10 @@ export const insight = {
         // Strip <pre><code> wrappers that may enclose pseudocode blocks (server-side markdown already parsed)
         insightHtml = insightHtml.replace(/<pre><code(?:[^>]*)>([\s\S]*?<div class="ps-root">[\s\S]*?<\/div>[\s\S]*?)<\/code><\/pre>/g, '$1');
         renderBody.innerHTML = insightHtml + reviewHtml;
+        // Body DOM rebuilt — old highlight <mark> nodes are gone.
+        // Clear fingerprint so renderHighlights (called by renderDeferredMath)
+        // will definitely repaint them instead of skipping.
+        this._highlightsFingerprint = '';
         this._buildTOCFromData(data.toc);
         this.renderDeferredMath(renderBody, () => this.renderHighlights());
         this.renderDeferredPrettier();
@@ -415,6 +419,7 @@ export const insight = {
     const iconEdit = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
     const iconReview = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>';
     const iconTrash = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+    const iconFormat = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>';
     const iconBackup = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
     const iconCheck = p.checked_at
       ? '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#4a7c59" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>'
@@ -422,6 +427,16 @@ export const insight = {
 
     const iconCancel = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
     const isChecked = !!p.checked_at;
+    const isFormatted = (() => {
+      if (!p.insight) return false;
+      const imgRe = /!\[([^\]]*)\]\(([^)\s]+)(?:\s*=\s*(\d+(?:\.\d+)?(?:%|px)?)(?:x(\d+(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)?\)/g;
+      const matches = [...p.insight.matchAll(imgRe)];
+      const local = matches.filter(m => !m[2].startsWith('http://') && !m[2].startsWith('https://'));
+      if (local.length === 0) return false;
+      // 只要存在本地图片且至少一个有 layout，就认为已经排版过
+      // （超大图会被 mdfmt 跳过，不应影响按钮状态）
+      return local.some(m => m[3] || m[5]);
+    })();
     const iconActions = `
       <span class="meta-icon-group">
         ${sourceUrl ? `<a href="${sourceUrl}" target="_blank" class="meta-icon" title="${p.source_type === 'arxiv' ? 'arXiv' : 'OpenReview'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>` : ''}
@@ -432,6 +447,7 @@ export const insight = {
         ${!isChecked && canEdit ? `<a href="/insight/${encodeURIComponent(p.source_type || 'arxiv')}/${p.id.split('/').map(encodeURIComponent).join('/')}/edit" class="meta-icon" title="编辑" onclick="if (event.metaKey || event.ctrlKey) return true; event.preventDefault(); app.editInsight();">${iconEdit}</a>` : ''}
         ${!isChecked && canEdit ? `<span class="meta-icon" title="审查" onclick="app.reviewInsight('${this.escape(p.id)}', event)">${iconReview}</span>` : ''}
         ${!isChecked && canEdit ? `<span class="meta-icon" title="清空" onclick="app.clearInsight('${this.escape(p.id)}')">${iconTrash}</span>` : ''}
+        ${!isChecked && canEdit ? `<span class="meta-icon ${isFormatted ? 'formatted-active' : ''}" title="排版" onclick="app.formatInsight('${this.escape(p.id)}', event)">${iconFormat}</span>` : ''}
         ${!isChecked && canEdit ? `<span class="meta-icon" title="备份" onclick="app.showInsightBackups('${this.escape(p.id)}', event)">${iconBackup}</span>` : ''}
         ${canEdit || isChecked ? `<span class="meta-icon ${isChecked ? 'checked-active' : ''}" title="${isChecked ? '已检查' : '检查'}" onclick="app.toggleChecked('${this.escape(p.id)}')">${iconCheck}</span>` : ''}
       </span>
@@ -524,6 +540,22 @@ export const insight = {
       </div>`;
     const tInner0 = performance.now();
     document.getElementById('insightPage').innerHTML = html;
+    // Restore comments panel open state after full re-render (e.g. toggleChecked)
+    if (this.commentsPanelOpen) {
+      const panel = document.getElementById('insightCommentsPanel');
+      if (panel) panel.classList.add('open');
+      const toggle = document.getElementById('commentsToggleBtn');
+      if (toggle) toggle.classList.remove('show');
+    }
+    // InnerHTML rebuild destroyed the old DOM; force re-render so comments
+    // and highlights are painted into the fresh DOM even if the data hasn't
+    // changed (fingerprint would otherwise skip the update).
+    if (this.comments.length > 0) {
+      this._commentsFingerprint = '';
+      this.renderComments();
+      this._highlightsFingerprint = '';
+      this.renderHighlights();
+    }
     const newBody = document.getElementById('insightPageBody');
     console.log('[perf]   innerHTML set:', (performance.now() - tInner0).toFixed(0), 'ms');
 
@@ -566,7 +598,6 @@ export const insight = {
     } else {
       this.stopInsightStream();
     }
-    const endBody = document.getElementById('insightPageBody');
   },
 
   _renderInsightMetaInfo(p, scoreClass) {

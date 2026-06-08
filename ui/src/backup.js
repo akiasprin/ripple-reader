@@ -19,7 +19,8 @@ export const backup = {
         const hasReview = b.insight_review ? '<span class="backup-review-tag">Review</span>' : '';
         const modelMatch = (b.insight || '').match(/本文使用\s*(.+?)\s*模型生成/);
         const modelTag = modelMatch ? `<span class="backup-model-tag">${this.escape(modelMatch[1])}</span>` : '';
-        const preview = b.insight.substring(0, 90).replace(/\n/g, ' ') + (b.insight.length > 90 ? '...' : '');
+        const insightText = b.insight || '';
+        const preview = insightText.substring(0, 90).replace(/\n/g, ' ') + (insightText.length > 90 ? '...' : '');
         html += `
           <div class="backup-item" data-backup-id="${b.id}">
             <div class="backup-item-body">
@@ -214,6 +215,33 @@ export const backup = {
     } catch (e) {
       console.error('[doRestoreBackup]', e);
       this.showToast('还原失败', 'error');
+    }
+  },
+
+  async formatInsight(id, event) {
+    if (!confirm('确定要自动排版吗？这会调整文章内所有图片的大小和布局。')) return;
+    const headers = {};
+    if (this.authToken) headers['Authorization'] = 'Bearer ' + this.authToken;
+    try {
+      const res = await fetch('/api/papers/' + encodeURIComponent(this.paperSource(id)) + '/' + encodeURIComponent(id) + '/format-insight', {
+        method: 'POST',
+        headers,
+      });
+      if (!res.ok) { this.showToast('排版失败', 'error'); return; }
+      const data = await res.json();
+      if (data.changed) {
+        this.showToast('排版完成：' + data.message, 'success');
+        // Refresh the page to show new layout
+        if (this.insightPageId === id && this.insightPageData) {
+          this.insightPageData.insight = null; // Force refetch
+          await this.showInsightPage(id, this.insightPageSource, true);
+        }
+      } else {
+        this.showToast(data.message || '无需排版', 'info');
+      }
+    } catch (e) {
+      console.error('[formatInsight]', e);
+      this.showToast('排版失败', 'error');
     }
   },
 

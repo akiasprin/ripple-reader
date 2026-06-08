@@ -127,10 +127,16 @@ export const markdown = {
     return html.replace(/\\begin\{algorithm\}[\s\S]*?\\end\{algorithm\}/g, (match) => {
       if (typeof pseudocode !== 'undefined') {
         try {
+          // 0. Decode HTML entities so pseudocode.js (and downstream KaTeX)
+          //    sees raw characters, not &gt; / &lt; / &amp;.
+          let normalized = match
+            .replace(/&gt;/g, '>')
+            .replace(/&lt;/g, '<')
+            .replace(/&amp;/g, '&');
           // 1. Normalize algorithmicx-style mixed-case commands to uppercase
           //    since pseudocode.js only recognizes ALL-CAPS commands.
-          let normalized = match.replace(
-            /\\(State|For|EndFor|If|Else|ElsIf|EndIf|While|EndWhile|Repeat|Until|Loop|EndLoop|Require|Ensure|Return|Print|Comment|Break|Continue|Function|EndFunction|Procedure|EndProcedure|Call|And|Or|Not|True|False|To|Downto|Upon|EndUpon)\b/g,
+          normalized = normalized.replace(
+            /\\(State|Statex|For|EndFor|If|Else|ElsIf|ElseIf|EndIf|While|EndWhile|Loop|EndLoop|Repeat|Until|Require|Ensure|Input|Output|Return|Print|Comment|Break|Continue|Function|EndFunction|Procedure|EndProcedure|Call|And|Or|Not|True|False|To|Downto|Let|Assert|Upon|EndUpon)\b/g,
             (m, cmd) => '\\' + cmd.toUpperCase()
           );
           // 2. Escape // so pseudocode.js lexer does not treat it as a line

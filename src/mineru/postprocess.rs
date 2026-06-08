@@ -1050,7 +1050,7 @@ fn annotate_subfigures(blocks: &mut [RawBlock], split_figures: &[String]) {
 /// `h_gap >= 15pt` geometric heuristic that mis-fires on single-column
 /// pages with widely-spaced sub-panels.
 pub fn detect_column_boundaries(intervals: &[(f32, f32)]) -> Vec<f32> {
-    const MIN_GUTTER: f32 = 15.0;
+    const MIN_GUTTER: f32 = 12.0;
     if intervals.len() < 4 {
         return Vec::new();
     }

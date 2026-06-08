@@ -2155,3 +2155,34 @@ async fn test_2605_31086_figure5_composite_subpanels() {
         img_bb.bbox
     );
 }
+
+/// Regression guard for 1608.05343 Figure 2 bleeding into the right column.
+///
+/// Figure 2 sits in the left column (x≈54..301) of a two-column page with
+/// column boundary at x≈296.5.  A right-column text block at x≈304..541
+/// was previously absorbed as a "side text block" (h_gap=0, vertical overlap
+/// satisfied), inflating the bbox to span the full page width.  The
+/// column-boundary guard must block this absorption.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_1608_05343_figure2_no_right_column_bleed() {
+    let paper_id = "1608.05343";
+    let src_zip = fixture_zip_for(paper_id).await;
+
+    let figures = reprocess_fixture(paper_id, &src_zip).await;
+
+    let fig2 = figures
+        .image_bboxes
+        .iter()
+        .find(|bb| bb.page_idx == 2 && bb.bbox[0] < 100.0)
+        .expect("Figure 2 must be present on page 2 (0-indexed)");
+
+    let right = fig2.bbox[0].max(fig2.bbox[2]);
+    // Column boundary is at ~296.5.  Figure 2's right edge must stay in
+    // the left column — the right-column text blocks start at x≈304.
+    assert!(
+        right < 320.0,
+        "Figure 2 bbox right edge must stay in the left column (< 320), got {} (bbox {:?})",
+        right,
+        fig2.bbox,
+    );
+}

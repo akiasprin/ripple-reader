@@ -48,39 +48,57 @@ pub fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
     image::image_dimensions(path).ok()
 }
 
+/// Layout decision for an image.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    /// Display width, e.g. "50%" or "480px".
+    pub width: String,
+    /// Horizontal alignment.
+    pub align: &'static str,
+}
+
 /// Decide layout (size, align) for an image based on its dimensions.
 ///
-/// Rules — width only, aspect-ratio guard:
-/// - Huge images (width >= 2500): leave untouched (None)
-/// - Very wide images (aspect > 3.0): lots of horizontal detail, shrinking makes them unreadable → None
-/// - Tall/skinny images (aspect < 0.6, e.g. single-page screenshots): 80% center
-/// - Everything else by width:
-///   width < 600      → 40% right
-///   600 – 1000       → 50% right
-///   1000 – 1500      → 60% right
-///   1500 – 2000      → 70% right
-///   >= 2000          → leave untouched
-pub fn decide_layout(
-    width: u32,
-    height: u32,
-    is_table: bool,
-) -> Option<(&'static str, &'static str)> {
+/// Scaling is page-relative: every image is sized as a percentage of
+/// `page_width_px` so that text appears at a consistent visual size
+/// across all figures.
+///
+/// Rules:
+/// - Very wide images (aspect > 3.0 for figures, > 5.2 for tables):
+///   shrinking ruins horizontal readability → None (leave untouched).
+/// - All other images: `display_pct = clamp(page_ratio * 120, 50, 95)`,
+///   where `page_ratio = image_width / page_width`.  Images at or below
+///   50% are right-floated; wider images are centered.
+pub fn decide_layout(width: u32, height: u32, is_table: bool, page_width_px: f64) -> Option<Layout> {
     let aspect = width as f64 / height.max(1) as f64;
 
-    // Huge width: leave untouched
-    if width >= 2500 {
-        return None;
-    }
-
     // Very wide images: shrinking ruins horizontal readability.
-    // Tables get a more lenient threshold since they often have simpler content.
     let aspect_threshold = if is_table { 5.2 } else { 3.0 };
     if aspect > aspect_threshold {
         return None;
     }
 
-    // Everything else: 50% right
-    Some(("50%", "right"))
+    // Scale based on the image's share of the page width.
+    // This ensures consistent visual text size across all images
+    // because every image is scaled by the same factor relative to the page.
+    // The 120× multiplier means an image occupying ~79% of page width
+    // already saturates to the 95% cap — intentional for full-width figures.
+    let page_ratio = if page_width_px > 0.0 {
+        (width as f64 / page_width_px).min(1.0)
+    } else {
+        // Corrupt or missing page image — fall back to a sensible ratio
+        // that produces a mid-range display percentage.
+        0.4
+    };
+    let display_pct = (page_ratio * 120.0).round() as u32;
+    let display_pct = display_pct.clamp(50, 95);
+
+    let align = if display_pct <= 50 { "right" } else { "center" };
+
+    Some(Layout {
+        width: format!("{}%", display_pct),
+        align,
+    })
 }
 
 /// Result of processing a single image.
@@ -104,7 +122,7 @@ pub enum Decision {
     Resized {
         width: u32,
         height: u32,
-        new_size: String,
+        new_width: String,
         new_align: String,
     },
 }
@@ -122,48 +140,37 @@ pub fn transform(paper_id: &str, markdown: &str, force: bool) -> (String, Vec<Im
         return (markdown.to_string(), results);
     }
 
+    // Estimate the page width in pixels.  Use a page:// image as the
+    // ground-truth if available; otherwise fall back to the widest image
+    // (which is typically close to full-page width in academic papers).
+    let page_width_px = images
+        .iter()
+        .find(|img| img.url.starts_with("page://"))
+        .and_then(|img| resolve_image_path(paper_id, &img.url))
+        .and_then(|path| image_dimensions(&path))
+        .map(|(w, _)| w as f64)
+        .unwrap_or_else(|| {
+            images
+                .iter()
+                .filter_map(|img| resolve_image_path(paper_id, &img.url))
+                .filter_map(|path| image_dimensions(&path))
+                .map(|(w, _)| w as f64)
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(3000.0)
+        });
+
     let mut output = String::with_capacity(markdown.len() + images.len() * 20);
     let mut last_end = 0usize;
+    let mut prev_float = false;
 
     for img in images {
         // Copy text before this image reference.
         output.push_str(&markdown[last_end..img.offset]);
 
-        let (decision, replacement) = if img.url.starts_with("http://")
-            || img.url.starts_with("https://")
-        {
-            (Decision::SkippedExternal, img.full.clone())
-        } else {
-            match resolve_image_path(paper_id, &img.url) {
-                Some(path) => match image_dimensions(&path) {
-                    Some((width, height)) => {
-                        let is_table = img.url.starts_with("table/") || img.alt.contains("Table");
-                        match decide_layout(width, height, is_table) {
-                            Some((new_size, new_align)) => {
-                                let decision = Decision::Resized {
-                                    width,
-                                    height,
-                                    new_size: new_size.to_string(),
-                                    new_align: new_align.to_string(),
-                                };
-                                let repl = rebuild_image(&img, Some(new_size), Some(new_align));
-                                (decision, repl)
-                            }
-                            None => {
-                                let decision = Decision::KeptLarge { width, height };
-                                (decision, img.full.clone())
-                            }
-                        }
-                    }
-                    None => (Decision::SkippedMissing, img.full.clone()),
-                },
-                None => (Decision::SkippedMissing, img.full.clone()),
-            }
-        };
-
         let img_len = img.full.len();
 
-        // When not forcing, skip images that already have layout.
+        // When not forcing, skip images that already have layout —
+        // do this BEFORE any I/O to avoid wasted filesystem reads.
         if !force && has_layout(&img) {
             output.push_str(&img.full);
             results.push(ImageResult {
@@ -173,6 +180,57 @@ pub fn transform(paper_id: &str, markdown: &str, force: bool) -> (String, Vec<Im
             last_end = img.offset + img_len;
             continue;
         }
+
+        let (decision, replacement) = if img.url.starts_with("http://")
+            || img.url.starts_with("https://")
+        {
+            prev_float = false;
+            (Decision::SkippedExternal, img.full.clone())
+        } else {
+            match resolve_image_path(paper_id, &img.url) {
+                Some(path) => match image_dimensions(&path) {
+                    Some((width, height)) => {
+                        let url_lower = img.url.to_lowercase();
+                        let alt_lower = img.alt.to_lowercase();
+                        let is_table = img.url.starts_with("table/")
+                            || url_lower.contains("/table")
+                            || url_lower.contains("_table")
+                            || alt_lower.contains("table")
+                            || alt_lower.contains("表格");
+                        match decide_layout(width, height, is_table, page_width_px) {
+                            Some(mut layout) => {
+                                // Avoid consecutive right-float images.
+                                if layout.align == "right" && prev_float {
+                                    layout.align = "center";
+                                }
+                                prev_float = layout.align == "right";
+                                let decision = Decision::Resized {
+                                    width,
+                                    height,
+                                    new_width: layout.width.clone(),
+                                    new_align: layout.align.to_string(),
+                                };
+                                let repl = rebuild_image(&img, Some(&layout.width), Some(layout.align));
+                                (decision, repl)
+                            }
+                            None => {
+                                prev_float = false;
+                                let decision = Decision::KeptLarge { width, height };
+                                (decision, img.full.clone())
+                            }
+                        }
+                    }
+                    None => {
+                        prev_float = false;
+                        (Decision::SkippedMissing, img.full.clone())
+                    }
+                },
+                None => {
+                    prev_float = false;
+                    (Decision::SkippedMissing, img.full.clone())
+                }
+            }
+        };
 
         output.push_str(&replacement);
         last_end = img.offset + img_len;
@@ -208,12 +266,12 @@ pub fn print_results(results: &[ImageResult]) {
             Decision::Resized {
                 width,
                 height,
-                new_size,
+                new_width,
                 new_align,
             } => {
                 println!(
                     "  [RESIZE] ({}x{}px) → {} {}: {}",
-                    width, height, new_size, new_align, r.original
+                    width, height, new_width, new_align, r.original
                 )
             }
         }

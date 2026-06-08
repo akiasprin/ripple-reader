@@ -238,3 +238,67 @@ Do not skip skills, ignore gstack errors, or work around missing gstack.
 Using gstack skills: After install, skills like /qa, /ship, /review, /investigate,
 and /browse are available. Use /browse for all web browsing.
 Use ~/.claude/skills/gstack/... for gstack file paths (the global path).
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence
+
+This project is indexed by GitNexus as **ripple-reader** (2871 symbols, 7145 relationships, 250 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+
+> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+
+## Always Do
+
+- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
+- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
+- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
+- When exploring unfamiliar code, use `query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
+- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+
+## Never Do
+
+- NEVER edit a function, class, or method without first running `impact` on it.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
+- NEVER commit changes without running `detect_changes()` to check affected scope.
+
+## Resources
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/ripple-reader/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/ripple-reader/clusters` | All functional areas |
+| `gitnexus://repo/ripple-reader/processes` | All execution flows |
+| `gitnexus://repo/ripple-reader/process/{name}` | Step-by-step execution trace |
+
+## CLI
+
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
+| Work in the Static area (185 symbols) | `.claude/skills/generated/static/SKILL.md` |
+| Work in the Tests area (182 symbols) | `.claude/skills/generated/tests/SKILL.md` |
+| Work in the Web area (122 symbols) | `.claude/skills/generated/web/SKILL.md` |
+| Work in the Mineru area (65 symbols) | `.claude/skills/generated/mineru/SKILL.md` |
+| Work in the Processor area (44 symbols) | `.claude/skills/generated/processor/SKILL.md` |
+| Work in the Db area (26 symbols) | `.claude/skills/generated/db/SKILL.md` |
+| Work in the Figure area (23 symbols) | `.claude/skills/generated/figure/SKILL.md` |
+| Work in the Cluster_111 area (21 symbols) | `.claude/skills/generated/cluster-111/SKILL.md` |
+| Work in the Source area (20 symbols) | `.claude/skills/generated/source/SKILL.md` |
+| Work in the Cluster_129 area (18 symbols) | `.claude/skills/generated/cluster-129/SKILL.md` |
+| Work in the Cluster_107 area (10 symbols) | `.claude/skills/generated/cluster-107/SKILL.md` |
+| Work in the Cluster_125 area (9 symbols) | `.claude/skills/generated/cluster-125/SKILL.md` |
+| Work in the Cluster_127 area (9 symbols) | `.claude/skills/generated/cluster-127/SKILL.md` |
+| Work in the Pseudocode.js area (8 symbols) | `.claude/skills/generated/pseudocode-js/SKILL.md` |
+| Work in the Cluster_114 area (8 symbols) | `.claude/skills/generated/cluster-114/SKILL.md` |
+| Work in the Mdfmt area (7 symbols) | `.claude/skills/generated/mdfmt/SKILL.md` |
+| Work in the Cluster_120 area (7 symbols) | `.claude/skills/generated/cluster-120/SKILL.md` |
+| Work in the Cluster_116 area (6 symbols) | `.claude/skills/generated/cluster-116/SKILL.md` |
+| Work in the Cluster_134 area (6 symbols) | `.claude/skills/generated/cluster-134/SKILL.md` |
+| Work in the Cluster_137 area (6 symbols) | `.claude/skills/generated/cluster-137/SKILL.md` |
+
+<!-- gitnexus:end -->
