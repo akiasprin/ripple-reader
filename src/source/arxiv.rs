@@ -4,14 +4,36 @@ use super::Paper;
 use anyhow::{Context, Result};
 use feed_rs::parser;
 use indicatif::ProgressBar;
-use serde::Deserialize;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
-const BATCH_SIZE: usize = 50;
+const BATCH_SIZE: usize = 100;
+
+/// Configurable cache TTL in seconds (default: 48h = 172800s).
+/// Hot-updatable from admin UI without restart.
+static CACHE_TTL_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(48 * 60 * 60);
+
+/// Set the cache TTL (value in hours, clamped to 1–8760).
+/// Called from both startup config load and admin UI updates.
+/// Hot-updatable at runtime without restart.
+pub fn set_cache_ttl_hours(hours: usize) {
+    let secs = (hours.clamp(1, 8760) as u64) * 60 * 60;
+    CACHE_TTL_SECS.store(secs, std::sync::atomic::Ordering::Relaxed);
+    info!(
+        "[arxiv.cache] TTL set to {}h ({}s); atomic reloaded",
+        secs / 3600,
+        secs
+    );
+}
+
+/// Get current cache TTL in seconds.
+fn cache_ttl_secs() -> u64 {
+    CACHE_TTL_SECS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 static ARXIV_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
@@ -36,31 +58,6 @@ static OAI_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::n
         .build()
         .expect("Failed to build OAI_CLIENT")
 });
-
-// Semantic Scholar fallback structures
-#[derive(Debug, Deserialize)]
-struct SsPaperResponse {
-    #[serde(rename = "paperId")]
-    _paper_id: Option<String>,
-    #[serde(rename = "externalIds")]
-    external_ids: Option<std::collections::HashMap<String, String>>,
-    title: Option<String>,
-    authors: Option<Vec<SsAuthor>>,
-    #[serde(default)]
-    year: Option<i32>,
-    #[serde(rename = "abstract")]
-    r#abstract: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SsAuthor {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SsBatchResponse {
-    papers: Vec<Option<SsPaperResponse>>,
-}
 
 /// Normalize arXiv ID by stripping the version suffix (e.g., "2401.12345v1" -> "2401.12345").
 fn normalize_arxiv_id(id: &str) -> String {
@@ -151,24 +148,12 @@ pub async fn fetch_papers_by_ids(
         failed_ids = html_failed;
     }
 
-    // Fallback to Semantic Scholar for still-failed IDs
     if !failed_ids.is_empty() {
-        info!(
-            "[arxiv] Fallback to Semantic Scholar for {} IDs",
-            failed_ids.len()
+        warn!(
+            "[arxiv] {} papers could not be fetched: {:?}",
+            failed_ids.len(),
+            failed_ids
         );
-        match fetch_from_semantic_scholar(&failed_ids).await {
-            Ok(ss_papers) => {
-                info!(
-                    "[arxiv] Semantic Scholar returned {} papers",
-                    ss_papers.len()
-                );
-                all_papers.extend(ss_papers);
-            }
-            Err(e) => {
-                warn!("[arxiv] Semantic Scholar fallback also failed: {}", e);
-            }
-        }
     }
 
     info!(
@@ -418,7 +403,7 @@ fn parse_arxiv_record(xml: &str, expected_id: &str) -> Result<Option<Paper>> {
     let paper_id = if arxiv_id.is_empty() {
         expected_id.to_string()
     } else {
-        arxiv_id
+        normalize_arxiv_id(&arxiv_id)
     };
 
     // Parse date to RFC3339
@@ -445,77 +430,6 @@ fn parse_arxiv_record(xml: &str, expected_id: &str) -> Result<Option<Paper>> {
         source_url: Some(format!("https://arxiv.org/abs/{}", paper_id)),
         external_id: Some(paper_id),
     }))
-}
-
-async fn fetch_from_semantic_scholar(ids: &[String]) -> Result<Vec<Paper>> {
-    let api_key = std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok();
-    let ss_ids: Vec<String> = ids.iter().map(|id| format!("arXiv:{}", id)).collect();
-
-    let mut req = ARXIV_CLIENT
-        .post("https://api.semanticscholar.org/graph/v1/paper/batch")
-        .json(&serde_json::json!({
-            "ids": ss_ids,
-            "fields": "title,authors,year,abstract,externalIds"
-        }));
-
-    if let Some(ref key) = api_key {
-        req = req.header("x-api-key", key);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .context("Semantic Scholar batch request failed")?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Semantic Scholar returned {}: {}", status, body);
-    }
-
-    let batch: SsBatchResponse = resp
-        .json()
-        .await
-        .context("Failed to parse Semantic Scholar response")?;
-
-    let mut papers = Vec::new();
-    for opt_paper in batch.papers {
-        let Some(paper) = opt_paper else { continue };
-        let id = paper
-            .external_ids
-            .as_ref()
-            .and_then(|m: &std::collections::HashMap<String, String>| m.get("ArXiv").cloned())
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-
-        let title = paper.title.unwrap_or_default();
-        let authors: Vec<String> = paper
-            .authors
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.name)
-            .collect();
-        let summary = paper.r#abstract.unwrap_or_default();
-        let published = paper
-            .year
-            .map(|y| format!("{}-01-01T00:00:00+00:00", y))
-            .unwrap_or_default();
-
-        papers.push(Paper {
-            id: id.clone(),
-            title,
-            authors,
-            summary,
-            pdf_url: format!("https://arxiv.org/pdf/{}.pdf", id),
-            published,
-            source_type: Some("arxiv".to_string()),
-            source_url: Some(format!("https://arxiv.org/abs/{}", id)),
-            external_id: Some(id),
-        });
-    }
-
-    Ok(papers)
 }
 
 pub async fn fetch_papers(query: &str, max_results: usize, page_size: usize) -> Result<Vec<Paper>> {
@@ -602,36 +516,122 @@ fn cache_path(url: &str) -> PathBuf {
     cache_dir().join(cache_key(url))
 }
 
+/// Format seconds as a human-readable "Xh Ym Zs" / "Xm Zs" / "Zs" string.
+fn format_human_secs(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        format!("{}h {}m {}s", h, m, s)
+    } else if m > 0 {
+        format!("{}m {}s", m, s)
+    } else {
+        format!("{}s", s)
+    }
+}
+
 fn read_cache(url: &str) -> Option<String> {
     let path = cache_path(url);
     if !path.exists() {
+        info!(
+            "[arxiv.cache] MISS url={} path={} reason=file_does_not_exist",
+            url,
+            path.display()
+        );
         return None;
     }
     let metadata = std::fs::metadata(&path).ok()?;
-    let modified = metadata.modified().ok()?;
+    let modified: SystemTime = metadata.modified().ok()?;
     let elapsed = modified.elapsed().ok()?;
-    if elapsed > Duration::from_secs(24 * 60 * 60) {
-        info!("[arxiv] Cache expired for {}", url);
-        let _ = std::fs::remove_file(&path);
+    let ttl = cache_ttl_secs();
+    let now = SystemTime::now();
+    let expires_at = modified
+        .checked_add(Duration::from_secs(ttl))
+        .unwrap_or(now);
+    let modified_rfc = chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339();
+    let expires_rfc = chrono::DateTime::<chrono::Utc>::from(expires_at).to_rfc3339();
+
+    if elapsed > Duration::from_secs(ttl) {
+        // Expired: treat as miss, but DO NOT delete the file. The next
+        // write_cache() will overwrite it in place, and the file remains
+        // on disk for forensics / for when the operator lowers TTL back
+        // below the file age.
+        info!(
+            "[arxiv.cache] EXPIRED url={} path={} written_at={} expires_at={} ttl={}h elapsed={} ({}) — keeping file, will overwrite on next write",
+            url,
+            path.display(),
+            modified_rfc,
+            expires_rfc,
+            ttl / 3600,
+            elapsed.as_secs(),
+            format_human_secs(elapsed.as_secs()),
+        );
         return None;
     }
     let body = std::fs::read_to_string(&path).ok()?;
-    info!("[arxiv] Cache hit for {}", url);
+    info!(
+        "[arxiv.cache] HIT url={} path={} written_at={} expires_at={} ttl={}h elapsed={} ({}) bytes={}",
+        url,
+        path.display(),
+        modified_rfc,
+        expires_rfc,
+        ttl / 3600,
+        elapsed.as_secs(),
+        format_human_secs(elapsed.as_secs()),
+        body.len(),
+    );
     Some(body)
 }
 
 fn write_cache(url: &str, body: &str) {
     let dir = cache_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        warn!("[arxiv] Failed to create cache dir: {}", e);
+        warn!("[arxiv.cache] Failed to create cache dir: {}", e);
         return;
     }
     let path = cache_path(url);
-    if let Err(e) = std::fs::write(&path, body) {
-        warn!("[arxiv] Failed to write cache for {}: {}", url, e);
-    } else {
-        info!("[arxiv] Cache saved for {}", url);
+    // Atomic write: stage to <path>.tmp, then rename into place. This way
+    // concurrent readers either see the old file in full or the new file in
+    // full — never a half-written file. On Unix, rename(2) atomically
+    // replaces the destination; on Windows, std::fs::rename falls back to
+    // MoveFileEx with MOVEFILE_REPLACE_EXISTING semantics.
+    let tmp_path = {
+        let mut p = path.clone();
+        let mut name = p.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
+    };
+    if let Err(e) = std::fs::write(&tmp_path, body) {
+        warn!("[arxiv.cache] Failed to write tmp cache for {}: {}", url, e);
+        return;
     }
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        warn!(
+            "[arxiv.cache] Failed to rename tmp cache into place for {} ({} -> {}): {}",
+            url,
+            tmp_path.display(),
+            path.display(),
+            e
+        );
+        // Best-effort cleanup of leftover tmp file.
+        let _ = std::fs::remove_file(&tmp_path);
+        return;
+    }
+    let now = SystemTime::now();
+    let ttl = cache_ttl_secs();
+    let expires_at = now.checked_add(Duration::from_secs(ttl)).unwrap_or(now);
+    let now_rfc = chrono::DateTime::<chrono::Utc>::from(now).to_rfc3339();
+    let expires_rfc = chrono::DateTime::<chrono::Utc>::from(expires_at).to_rfc3339();
+    info!(
+        "[arxiv.cache] WRITE url={} path={} written_at={} expires_at={} ttl={}h bytes={}",
+        url,
+        path.display(),
+        now_rfc,
+        expires_rfc,
+        ttl / 3600,
+        body.len(),
+    );
 }
 
 async fn fetch_single_page(url: &str, max_retries: usize) -> Result<(Vec<Paper>, bool)> {
@@ -717,15 +717,15 @@ fn parse_feed(body: &str) -> Result<Vec<Paper>> {
         let published = entry.published.map(|d| d.to_rfc3339()).unwrap_or_default();
 
         papers.push(Paper {
-            id,
+            id: id.clone(),
             title,
             authors,
             summary,
             pdf_url,
             published,
             source_type: Some("arxiv".to_string()),
-            source_url: Some(format!("https://arxiv.org/abs/{}", raw_id)),
-            external_id: Some(raw_id),
+            source_url: Some(format!("https://arxiv.org/abs/{}", id)),
+            external_id: Some(id),
         });
     }
     Ok(papers)

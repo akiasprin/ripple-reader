@@ -20,7 +20,7 @@ export const paper = {
       title: document.getElementById('f-title-' + id).value,
       score: parseFloat(document.getElementById('f-score-' + id).value),
       paper_type: document.getElementById('f-type-' + id).value,
-      abstract: document.getElementById('f-abstract-' + id).value,
+      abstract_zh: document.getElementById('f-abstract-' + id).value,
       summary: document.getElementById('f-summary-' + id).value,
     };
     try {
@@ -90,7 +90,6 @@ export const paper = {
   },
 
   async setMark(id, mark) {
-    this.haptic('medium');
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.authToken) headers['Authorization'] = 'Bearer ' + this.authToken;

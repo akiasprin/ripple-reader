@@ -97,7 +97,8 @@ pub struct Processor {
     pub(super) max_tokens: u32,
     pub(super) reasoning_effort: Option<String>,
     pub(super) output_config_effort: Option<String>,
-    pub(super) thinking_budget_tokens: Option<u32>,
+    pub(super) temperature: Option<f32>,
+    pub(super) top_p: Option<f32>,
     pub(super) max_retries: usize,
     pub(super) summarize_template: PromptTemplate,
     pub(super) translate_template: PromptTemplate,
@@ -108,6 +109,7 @@ pub struct Processor {
     pub(super) tools: Vec<serde_json::Value>,
     pub(super) semaphore: Arc<Semaphore>,
     pub(super) insight_semaphore: Arc<Semaphore>,
+    pub(super) text_sem: Arc<Semaphore>,
     pub(super) key_index: AtomicUsize,
 }
 
@@ -122,8 +124,9 @@ impl Processor {
         max_tokens: u32,
         reasoning_effort: Option<String>,
         output_config_effort: Option<String>,
-        thinking_budget_tokens: Option<u32>,
         user_agent: Option<String>,
+        temperature: Option<f32>,
+        top_p: Option<f32>,
         llm_max_workers: usize,
         insight_max_workers: usize,
         max_retries: usize,
@@ -134,12 +137,13 @@ impl Processor {
         anthropic_oauth_token: Option<String>,
     ) -> Self {
         info!(
-            "[processor] Initializing provider={} type={:?} model={}, llm_max_workers={}, insight_max_workers={}, max_retries={}, keys={}, reasoning_effort={:?}, output_config_effort={:?}, thinking_budget_tokens={:?}, user_agent={:?}",
-            provider_name, provider_type, model, llm_max_workers, insight_max_workers, max_retries, api_keys.len(), reasoning_effort, output_config_effort, thinking_budget_tokens, user_agent
+            "[processor] Initializing provider={} type={:?} model={}, llm_max_workers={}, insight_max_workers={}, max_retries={}, keys={}, reasoning_effort={:?}, output_config_effort={:?}, temperature={:?}, top_p={:?}, user_agent={:?}",
+            provider_name, provider_type, model, llm_max_workers, insight_max_workers, max_retries, api_keys.len(), reasoning_effort, output_config_effort, temperature, top_p, user_agent
         );
 
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(14400))
+            .connect_timeout(Duration::from_secs(600))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -186,8 +190,9 @@ impl Processor {
             max_tokens,
             reasoning_effort,
             output_config_effort,
-            thinking_budget_tokens,
             user_agent,
+            temperature,
+            top_p,
             max_retries,
             summarize_template,
             translate_template,
@@ -197,6 +202,7 @@ impl Processor {
             tools,
             semaphore: Arc::new(Semaphore::new(llm_max_workers)),
             insight_semaphore: Arc::new(Semaphore::new(insight_max_workers)),
+            text_sem: Arc::new(Semaphore::new(llm_max_workers)),
             key_index: AtomicUsize::new(0),
         }
     }

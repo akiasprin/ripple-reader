@@ -114,8 +114,22 @@ export const tags = {
 
   renderTags(p) {
     if (!p.tags || p.tags.length === 0) return '';
+    const isMobile = !this.isDesktopViewport();
+    const tailMaxLen = isMobile ? 16 : 28;
     const visible = p.tags.slice(0, 3);
-    return '（' + visible.map(t => `<span class="tag-link">${this.escape(t.tag)}</span>`).join('、') + '）';
+    const parts = [];
+    for (let i = 0; i < visible.length; i++) {
+      const t = visible[i];
+      if (i === 0) {
+        parts.push(`<span class="tag-link" title="${this.escape(t.tag)}">${this.escape(t.tag)}</span>`);
+      } else {
+        const truncated = t.tag.length > tailMaxLen;
+        const label = truncated ? t.tag.slice(0, tailMaxLen) + '…' : t.tag;
+        parts.push(`<span class="tag-link" title="${this.escape(t.tag)}">${this.escape(label)}</span>`);
+        if (truncated) break;
+      }
+    }
+    return parts.join('、');
   },
 
   async filterByTag(tag) {

@@ -267,10 +267,31 @@ Parser.prototype._parseCaption = function () {
     return captionNode;
 };
 
-Parser.prototype._parseBlock = function () {
+Parser.prototype._parseBlock = function (exitIndent) {
+    if (exitIndent === undefined) exitIndent = -1;
     var blockNode = new ParseNode('block');
+    var maxSeenIndent = -1;
 
     while (true) {
+        // Stop if the next token is on a new line and is indented no more than
+        // the opener of this block. We additionally require that we have already
+        // seen a child indented deeper than the opener, so that algorithms
+        // without indentation still parse their body before hitting an explicit
+        // \END... command at the same column.
+        var nextAtom = this._lexer._nextAtom;
+        if (nextAtom.type === 'EOF') break;
+        if (nextAtom.newlineBefore && nextAtom.lineIndent <= exitIndent &&
+            (nextAtom.lineIndent < exitIndent || maxSeenIndent > exitIndent)) {
+            break;
+        }
+
+        // Track the deepest opener indentation seen in this block.  This is
+        // used above to distinguish a sibling statement from a closing keyword
+        // when both sit at the opener's column.
+        if (nextAtom.newlineBefore && nextAtom.lineIndent > maxSeenIndent) {
+            maxSeenIndent = nextAtom.lineIndent;
+        }
+
         var controlNode = this._parseControl();
         if (controlNode) {
             blockNode.addChild(controlNode);
@@ -325,6 +346,7 @@ Parser.prototype._parseFunction = function () {
 
     // \FUNCTION{funcName}{funcArgs}
     var funcType = this._lexer.get().text; // FUNCTION or PROCEDURE
+    var openerIndent = this._lexer.get().lineIndent;
     lexer.expect('open');
     var funcName = lexer.expect('ordinary');
     lexer.expect('close');
@@ -332,12 +354,13 @@ Parser.prototype._parseFunction = function () {
     var argsNode = this._parseCloseText();
     lexer.expect('close');
     // <block>
-    var blockNode = this._parseBlock();
+    var blockNode = this._parseBlock(openerIndent);
     // \ENDFUNCTION
-    lexer.expect('func', `end${funcType}`);
+    var hasEnd = lexer.accept('func', `end${funcType}`);
 
     var functionNode = new ParseNode('function',
-                                     { type: funcType, name: funcName });
+                                     { type: funcType, name: funcName,
+                                       hasEnd: hasEnd });
     functionNode.addChild(argsNode);
     functionNode.addChild(blockNode);
     return functionNode;
@@ -347,12 +370,13 @@ Parser.prototype._parseIf = function () {
     if (!this._lexer.accept('func', 'if')) return null;
 
     var ifNode = new ParseNode('if');
+    var openerIndent = this._lexer.get().lineIndent;
 
     // { <cond> } <block>
     this._lexer.expect('open');
     ifNode.addChild(this._parseCond());
     this._lexer.expect('close');
-    ifNode.addChild(this._parseBlock());
+    ifNode.addChild(this._parseBlock(openerIndent));
 
     // ( \ELIF { <cond> } <block> )[0...n]
     var numElif = 0;
@@ -360,7 +384,7 @@ Parser.prototype._parseIf = function () {
         this._lexer.expect('open');
         ifNode.addChild(this._parseCond());
         this._lexer.expect('close');
-        ifNode.addChild(this._parseBlock());
+        ifNode.addChild(this._parseBlock(openerIndent));
         numElif++;
     }
 
@@ -368,13 +392,13 @@ Parser.prototype._parseIf = function () {
     var hasElse = false;
     if (this._lexer.accept('func', 'else')) {
         hasElse = true;
-        ifNode.addChild(this._parseBlock());
+        ifNode.addChild(this._parseBlock(openerIndent));
     }
 
-    // \ENDIF
-    this._lexer.expect('func', 'endif');
+    // \ENDIF (optional if indentation implies the closing)
+    var hasEnd = this._lexer.accept('func', 'endif');
 
-    ifNode.value = { numElif: numElif, hasElse: hasElse };
+    ifNode.value = { numElif: numElif, hasElse: hasElse, hasEnd: hasEnd };
     return ifNode;
 };
 
@@ -382,7 +406,8 @@ Parser.prototype._parseLoop = function () {
     if (!this._lexer.accept('func', ['FOR', 'FORALL', 'WHILE', 'LOOP'])) return null;
 
     var loopName = this._lexer.get().text.toLowerCase();
-    var loopNode = new ParseNode('loop', loopName);
+    var openerIndent = this._lexer.get().lineIndent;
+    var loopNode = new ParseNode('loop');
 
     if (loopName === 'loop') {
         // \LOOP has no condition
@@ -393,25 +418,30 @@ Parser.prototype._parseLoop = function () {
         loopNode.addChild(this._parseCond());
         this._lexer.expect('close');
     }
-    loopNode.addChild(this._parseBlock());
+    loopNode.addChild(this._parseBlock(openerIndent));
 
     // \ENDFOR / \ENDWHILE / \ENDLOOP
     var endLoop = loopName !== 'forall' ? `end${loopName}` : 'endfor';
-    try {
-        this._lexer.expect('func', endLoop);
-    } catch (e) {
-        // Tolerant fallback: some algorithms use mismatched end tags
-        var altEnds = ['endwhile', 'endfor', 'endloop', 'endif'];
-        var matched = false;
-        for (var i = 0; i < altEnds.length; i++) {
-            if (this._lexer.accept('func', altEnds[i])) {
-                matched = true;
-                break;
+    var hasEnd = false;
+    if (this._lexer.accept('func', endLoop)) {
+        hasEnd = true;
+    } else {
+        // Tolerant fallback: some algorithms use mismatched end tags, but only
+        // consume a stray end command if it sits at the same indentation level
+        // as this loop. Otherwise let the block close implicitly.
+        var nextAtom = this._lexer._nextAtom;
+        if (nextAtom.newlineBefore && nextAtom.lineIndent === openerIndent) {
+            var altEnds = ['endwhile', 'endfor', 'endloop', 'endif'];
+            for (var i = 0; i < altEnds.length; i++) {
+                if (this._lexer.accept('func', altEnds[i])) {
+                    hasEnd = true;
+                    break;
+                }
             }
         }
-        if (!matched) throw e;
     }
 
+    loopNode.value = { type: loopName, hasEnd: hasEnd };
     return loopNode;
 };
 
@@ -439,16 +469,18 @@ Parser.prototype._parseUpon = function () {
     if (!this._lexer.accept('func', 'upon')) return null;
 
     var uponNode = new ParseNode('upon');
+    var openerIndent = this._lexer.get().lineIndent;
 
     // { <cond> } <block>
     this._lexer.expect('open');
     uponNode.addChild(this._parseCond());
     this._lexer.expect('close');
-    uponNode.addChild(this._parseBlock());
+    uponNode.addChild(this._parseBlock(openerIndent));
 
     // \ENDUPON
-    this._lexer.expect('func', 'endupon');
+    var hasEnd = this._lexer.accept('func', 'endupon');
 
+    uponNode.value = { hasEnd: hasEnd };
     return uponNode;
 };
 

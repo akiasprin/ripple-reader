@@ -73,7 +73,7 @@ fn run_file_mode(args: Args) -> Result<()> {
                 .to_string()
         });
 
-    let (new_md, results) = transform(&paper_id, &markdown, args.force);
+    let (new_md, results) = transform(&paper_id, &markdown, args.force, None);
     print_results(&results);
 
     if let Some(out) = args.output {
@@ -99,16 +99,12 @@ async fn run_db_mode(args: Args) -> Result<()> {
 /// Backup current insight before overwriting.
 /// Returns Ok(()) on success; propagates errors so the caller can
 /// decide whether it's safe to proceed with the write.
-async fn backup_paper_insight(
-    db: &Db,
-    paper: &ripple_reader::db::types::DbPaper,
-) -> Result<()> {
+async fn backup_paper_insight(db: &Db, paper: &ripple_reader::db::types::DbPaper) -> Result<()> {
     let insight_processed_at_str = paper
         .insight_processed_at
         .as_ref()
         .map(|dt| dt.to_rfc3339());
-    let insight_reviewed_at_str =
-        paper.insight_reviewed_at.as_ref().map(|dt| dt.to_rfc3339());
+    let insight_reviewed_at_str = paper.insight_reviewed_at.as_ref().map(|dt| dt.to_rfc3339());
     db.backup_insight(
         &paper.id,
         &paper.insight,
@@ -140,7 +136,9 @@ async fn run_db_single(id: &str, write: bool, force: bool) -> Result<()> {
     }
 
     let paper_id = format!("{}/{}", paper.source_type, paper.id);
-    let (new_md, results) = transform(&paper_id, markdown, force);
+    let zip_path = std::path::PathBuf::from(format!("figures/{}/mineru.zip", paper_id));
+    let page_width_px = ripple_reader::mdfmt::page_width_from_layout(&zip_path, 600);
+    let (new_md, results) = transform(&paper_id, markdown, force, page_width_px);
     print_results(&results);
 
     let changed = new_md != *markdown;
@@ -194,7 +192,9 @@ async fn run_db_all(write: bool, force: bool) -> Result<()> {
         }
 
         let paper_id = format!("{}/{}", paper.source_type, paper.id);
-        let (new_md, results) = transform(&paper_id, markdown, force);
+        let zip_path = std::path::PathBuf::from(format!("figures/{}/mineru.zip", paper_id));
+        let page_width_px = ripple_reader::mdfmt::page_width_from_layout(&zip_path, 600);
+        let (new_md, results) = transform(&paper_id, markdown, force, page_width_px);
         let has_changes = new_md != *markdown;
 
         if has_changes {

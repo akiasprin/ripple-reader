@@ -43,6 +43,7 @@ pub(crate) async fn get_config(
         arxiv_query: cfg.arxiv_query.clone(),
         arxiv_max_results: cfg.arxiv_max_results,
         arxiv_page_size: cfg.arxiv_page_size,
+        arxiv_cache_ttl_hours: cfg.arxiv_cache_ttl_hours,
         llm_max_workers: cfg.llm_max_workers,
         llm_max_retries: cfg.llm_max_retries,
         pdf_max_workers: cfg.pdf_max_workers,
@@ -93,6 +94,11 @@ pub(crate) async fn update_config(
         if let Some(v) = req.arxiv_page_size {
             updates.insert("ARXIV_PAGE_SIZE".to_string(), v.to_string());
             cfg.arxiv_page_size = v;
+        }
+        if let Some(v) = req.arxiv_cache_ttl_hours {
+            updates.insert("ARXIV_CACHE_TTL_HOURS".to_string(), v.to_string());
+            cfg.arxiv_cache_ttl_hours = v;
+            crate::source::arxiv::set_cache_ttl_hours(v);
         }
         if let Some(v) = req.llm_max_workers {
             if cfg.llm_max_workers != v {
@@ -178,6 +184,7 @@ pub(crate) async fn update_config(
         arxiv_query: cfg.arxiv_query.clone(),
         arxiv_max_results: cfg.arxiv_max_results,
         arxiv_page_size: cfg.arxiv_page_size,
+        arxiv_cache_ttl_hours: cfg.arxiv_cache_ttl_hours,
         llm_max_workers: cfg.llm_max_workers,
         llm_max_retries: cfg.llm_max_retries,
         pdf_max_workers: cfg.pdf_max_workers,
@@ -204,6 +211,8 @@ fn provider_to_detail((idx, p): (usize, ProviderConfig)) -> ProviderDetail {
         model: p.model,
         max_tokens: p.max_tokens,
         reasoning_effort: p.reasoning_effort,
+        temperature: p.temperature,
+        top_p: p.top_p,
         is_digest: p.is_digest,
         is_comment: p.is_comment,
         enabled: p.enabled,
@@ -268,6 +277,8 @@ pub(crate) async fn create_provider(
         model: req.model,
         max_tokens: req.max_tokens,
         reasoning_effort: req.reasoning_effort,
+        temperature: req.temperature,
+        top_p: req.top_p,
         user_agent: String::new(),
         is_digest: req.is_digest,
         is_comment: req.is_comment,
@@ -324,6 +335,8 @@ pub(crate) async fn update_provider(
         model: req.model,
         max_tokens: req.max_tokens,
         reasoning_effort: req.reasoning_effort,
+        temperature: req.temperature,
+        top_p: req.top_p,
         user_agent: String::new(),
         is_digest: req.is_digest,
         is_comment: req.is_comment,
@@ -374,15 +387,29 @@ pub(crate) async fn delete_provider_handler(
     match delete_provider(&env_file, index) {
         Ok(_) => {
             info!("[admin] deleted provider[{}]", index);
-            if let Err(e) = rebuild_insight_processors(&state).await {
-                error!(
-                    "[admin] failed to rebuild processor after deleting provider: {}",
-                    e
-                );
+            match rebuild_insight_processors(&state).await {
+                Ok(_) => {
+                    let mut res = HashMap::new();
+                    res.insert("status".to_string(), "deleted".to_string());
+                    Ok(Json(res))
+                }
+                Err(e) => {
+                    error!(
+                        "[admin] provider[{}] deleted from .env, but failed to rebuild processors: {}",
+                        index, e
+                    );
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            code: 500,
+                            reason: format!(
+                                "Provider deleted from .env, but failed to rebuild processors: {}",
+                                e
+                            ),
+                        }),
+                    ))
+                }
             }
-            let mut res = HashMap::new();
-            res.insert("status".to_string(), "deleted".to_string());
-            Ok(Json(res))
         }
         Err(e) => {
             error!("[admin] failed to delete provider: {}", e);
@@ -417,24 +444,38 @@ pub(crate) async fn reorder_providers(
     match crate::env_editor::reorder_providers(&env_file, &req.order) {
         Ok(_) => {
             info!("[admin] Reordered providers: {:?}", req.order);
-            if let Err(e) = rebuild_insight_processors(&state).await {
-                error!(
-                    "[admin] failed to rebuild processor after reordering providers: {}",
-                    e
-                );
-            }
-            // Return updated list
-            match read_providers(&env_file) {
-                Ok(list) => Ok(Json(ProviderListResponse {
-                    providers: list.into_iter().map(provider_to_detail).collect(),
-                })),
+            match rebuild_insight_processors(&state).await {
+                Ok(_) => {
+                    // Return updated list
+                    match read_providers(&env_file) {
+                        Ok(list) => Ok(Json(ProviderListResponse {
+                            providers: list.into_iter().map(provider_to_detail).collect(),
+                        })),
+                        Err(e) => {
+                            error!("[admin] failed to read providers after reorder: {}", e);
+                            Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ErrorResponse {
+                                    code: 500,
+                                    reason: format!("Reorder succeeded but read failed: {}", e),
+                                }),
+                            ))
+                        }
+                    }
+                }
                 Err(e) => {
-                    error!("[admin] failed to read providers after reorder: {}", e);
+                    error!(
+                        "[admin] providers reordered, but failed to rebuild processors: {}",
+                        e
+                    );
                     Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
                             code: 500,
-                            reason: format!("Reorder succeeded but read failed: {}", e),
+                            reason: format!(
+                                "Providers reordered, but failed to rebuild processors: {}",
+                                e
+                            ),
                         }),
                     ))
                 }
@@ -480,6 +521,10 @@ pub(crate) async fn rebuild_insight_processors(state: &AppState) -> anyhow::Resu
 
     let mut new_processors = Vec::with_capacity(providers.len());
     for (_idx, p) in providers {
+        if p.enabled != "true" {
+            info!("[admin] Skipping disabled insight provider '{}'", p.name);
+            continue;
+        }
         let provider_type = ProviderType::parse(&p.provider_type);
         let reasoning_effort = if p.reasoning_effort.is_empty() {
             None
@@ -493,6 +538,16 @@ pub(crate) async fn rebuild_insight_processors(state: &AppState) -> anyhow::Resu
             Some(p.user_agent.clone())
         };
         let max_tokens = p.max_tokens.parse().unwrap_or(0);
+        let temperature = if p.temperature.is_empty() {
+            None
+        } else {
+            p.temperature.parse().ok()
+        };
+        let top_p = if p.top_p.is_empty() {
+            None
+        } else {
+            p.top_p.parse().ok()
+        };
 
         let processor = Processor::new(
             provider_type,
@@ -503,8 +558,9 @@ pub(crate) async fn rebuild_insight_processors(state: &AppState) -> anyhow::Resu
             max_tokens,
             reasoning_effort,
             output_config_effort,
-            None,
             user_agent,
+            temperature,
+            top_p,
             cfg.llm_max_workers,
             cfg.insight_max_workers,
             cfg.llm_max_retries,
@@ -572,8 +628,9 @@ pub(crate) async fn run_fetch(state: Arc<AppState>) -> anyhow::Result<()> {
         summarizer.max_tokens,
         summarizer.reasoning_effort.clone(),
         summarizer.output_config_effort.clone(),
-        None,
         summarizer.user_agent.clone(),
+        summarizer.temperature,
+        summarizer.top_p,
         cfg.llm_max_workers,
         cfg.insight_max_workers,
         cfg.llm_max_retries,
@@ -647,7 +704,7 @@ pub(crate) async fn run_fetch(state: Arc<AppState>) -> anyhow::Result<()> {
                 return;
             }
             let _permit = db_sem_c.acquire().await;
-            match process_paper_with_cache(&proc, &db_c, &p, &pdf_sem_c, false).await {
+            match process_paper_with_cache(&proc, &db_c, &p, &pdf_sem_c, false, false).await {
                 Ok((_summary, _text, _cached)) => {
                     let mut s = state_c.fetch_status.write().await;
                     s.completed += 1;

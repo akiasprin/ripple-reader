@@ -193,7 +193,6 @@ ripple-reader [COMMAND] [OPTIONS]
 | `arxiv-fetch` | 一次性抓取论文并打印评分与摘要 |
 | `add [--force] <id>...` | 按 arXiv / OpenReview ID 添加论文；`--force` 强制重新总结 |
 | `add --force-all` | 重新处理所有「无标签」论文 |
-| `add --resummarize-all` | 重新总结全部论文（保留已有深度解读） |
 | `cleanup-deleted` | 物理清理已软删除的论文 |
 | `export-authors [--query Q] [--output F] [--max-results N]` | 从 arXiv 导出作者列表 |
 | `init-authors [--file F]` | 批量初始化作者 Semantic Scholar 数据 |

@@ -8,6 +8,88 @@ use crate::mineru::utils::{
 };
 
 impl LayoutParaBlock {
+    /// Detect MinerU mis-labeling a figure as a table.
+    ///
+    /// Some papers (e.g. 2406.16860 page 18) place a 2x2 image grid below a
+    /// real table.  MinerU groups the grid plus its "Figure N" caption into a
+    /// single `table` para_block, with the real table's caption also nested
+    /// above the grid.  When a `table` block carries a figure caption below
+    /// its body, it should be treated as an image so the figure caption is
+    /// selected and the grid is not swallowed by the table above.
+    pub fn should_reclassify_table_as_image(&self) -> bool {
+        if self.block_type != "table" {
+            return false;
+        }
+        let min_body_top = self
+            .all_subs()
+            .iter()
+            .filter(|b| b.is_body())
+            .map(|b| b.bbox.get(1).copied().unwrap_or(f32::MAX))
+            .fold(f32::MAX, f32::min);
+        let max_body_bottom = self
+            .all_subs()
+            .iter()
+            .filter(|b| b.is_body())
+            .map(|b| b.bbox.get(3).copied().unwrap_or(0.0))
+            .fold(0.0f32, f32::max);
+        if min_body_top == f32::MAX || max_body_bottom == 0.0 {
+            return false;
+        }
+
+        // Must contain a table caption above the body (the real table's caption)
+        // AND a figure caption below the body (the mis-labeled figure's caption).
+        let has_table_caption_above = self.all_subs().iter().any(|sub| {
+            if sub.is_body() {
+                return false;
+            }
+            let text: String = sub
+                .lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .filter_map(|s| s.content.as_ref())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() || !looks_like_caption(&text) {
+                return false;
+            }
+            let Some(cn) = extract_caption_number(&text) else {
+                return false;
+            };
+            if !cn.starts_with("T:") {
+                return false;
+            }
+            let sub_bottom = sub.bbox.get(3).copied().unwrap_or(f32::MAX);
+            sub_bottom <= min_body_top + 2.0
+        });
+        let has_figure_caption_below = self.all_subs().iter().any(|sub| {
+            if sub.is_body() {
+                return false;
+            }
+            let text: String = sub
+                .lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .filter_map(|s| s.content.as_ref())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() || !looks_like_caption(&text) {
+                return false;
+            }
+            let Some(cn) = extract_caption_number(&text) else {
+                return false;
+            };
+            if !cn.starts_with("F:") {
+                return false;
+            }
+            let sub_top = sub.bbox.get(1).copied().unwrap_or(0.0);
+            sub_top >= max_body_bottom - 2.0
+        });
+
+        has_table_caption_above && has_figure_caption_below
+    }
+
     /// Return all sub-blocks, falling back to a synthetic sub-block built from
     /// the para-block's own `lines` when `blocks` is empty.  Some MinerU
     /// outputs (e.g. 2604.13627) put `lines` directly on the para_block
@@ -138,6 +220,27 @@ impl LayoutParaBlock {
                 .iter()
                 .any(|sub| sub.bbox.get(1).copied().unwrap_or(0.0) >= max_body_bottom);
             if has_above && has_below {
+                // When all captions type-match and are split above+b below the
+                // body, keep only the BELOW caption.  MinerU sometimes nests
+                // the preceding block's caption above the current body (e.g.
+                // 2112.10752 page 25: Table 14's caption appears above Table
+                // 15's body in Table 15's para_block).  Keeping the below
+                // caption lets this block keep its native caption while the
+                // orphaned above caption is routed back to its own body by the
+                // rebind logic.
+                let below: Vec<_> = candidates
+                    .iter()
+                    .filter(|sub| sub.bbox.get(1).copied().unwrap_or(0.0) >= max_body_bottom)
+                    .cloned()
+                    .collect();
+                if !below.is_empty() {
+                    pp_info(&format!(
+                        "[mineru] selected_captions: captions above AND below body — keeping {} below caption(s), dropping above so they become orphans (body_top={:.1} body_bottom={:.1})",
+                        below.len(),
+                        min_image_top, max_body_bottom
+                    ));
+                    return below;
+                }
                 pp_info(&format!(
                     "[mineru] selected_captions: block has captions above AND below body — returning empty so all become orphans for spatial rebind (body_top={:.1} body_bottom={:.1})",
                     min_image_top, max_body_bottom
@@ -620,14 +723,11 @@ impl LayoutParaBlock {
                 }
 
                 // When all captions type-match but split above AND below
-                // body, we cannot tell which is the "true" one from this
-                // block alone (the convention "table caption above body" is
-                // not universal — e.g. 1512.03385 places table captions
-                // BELOW the body).  Emit every type-matched caption as
-                // orphan; `selected_captions` returns empty for this same
-                // case so the block becomes a placeholder.  The rebind
-                // logic then assigns each caption to the spatially-closest
-                // bare body.
+                // body, only emit the ABOVE caption(s) as orphans.
+                // `selected_captions` keeps the below caption(s) so the
+                // block retains its native caption; the foreign caption
+                // above the body (mis-nested by MinerU from the preceding
+                // block) is emitted here for spatial rebind.
                 let has_above_cap = self.all_subs().iter().any(|b| {
                     if b.is_body() {
                         return false;
@@ -663,7 +763,11 @@ impl LayoutParaBlock {
                     b.bbox.get(1).copied().unwrap_or(0.0) >= max_image_bottom
                 });
                 if has_above_cap && has_below_cap {
-                    orphans.push((text, [sub.bbox[0], sub.bbox[1], sub.bbox[2], sub.bbox[3]]));
+                    // Only emit the above caption(s) — the below one stays
+                    // with this block via selected_captions.
+                    if sub_bottom <= min_image_top {
+                        orphans.push((text, [sub.bbox[0], sub.bbox[1], sub.bbox[2], sub.bbox[3]]));
+                    }
                     continue;
                 }
 

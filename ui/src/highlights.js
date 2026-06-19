@@ -189,17 +189,15 @@ export const highlights = {
     // Clear existing highlights first (unwrap mark elements and image highlights)
     this.unwrapHighlights(page);
     if (!this.comments || this.comments.length === 0) return;
-    // For each comment, try to find and highlight the quote in body and header
-    const body = document.getElementById('insightPageBody');
-    const header = page.querySelector('.insight-page-header');
+    // Search the full page once per comment. comment-card / ai-comment
+    // subtrees are excluded by the tree-walker filter so their displayed
+    // quote text won't produce false matches.
     this.comments.forEach(comment => {
       if (comment.parent_id) return;
       if (this.isImageQuote(comment.quote)) {
-        if (body) this.highlightImage(body, comment);
-        if (header) this.highlightImage(header, comment);
+        this.highlightImage(page, comment);
       } else {
-        if (body) this.highlightQuote(body, comment);
-        if (header) this.highlightQuote(header, comment);
+        this.highlightQuote(page, comment);
       }
     });
   },
@@ -265,6 +263,13 @@ export const highlights = {
       container,
       NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
       (node) => {
+        // Reject comment-card / ai-comment subtrees so their displayed
+        // quote text doesn't pollute fullText and cause false matches.
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.matches && node.matches('.comment-card, .ai-comment')) {
+            return NodeFilter.FILTER_REJECT;
+          }
+        }
         if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
         if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG') return NodeFilter.FILTER_ACCEPT;
         return NodeFilter.FILTER_SKIP;
@@ -410,14 +415,9 @@ export const highlights = {
       console.log('[highlightQuote] surroundContents failed for comment', comment.id, e.message, '→ text-node fallback');
       try {
         const marks = [];
-        for (let i = startIdx; i <= endIdx; i++) {
-          const info = boundaries[i];
-          if (info.isImg) continue;
-          const node = info.node;
-          const nodeStart = Math.max(quoteStart, info.start) - info.start;
-          const nodeEnd = Math.min(quoteEnd, info.end) - info.start;
-          if (nodeEnd <= nodeStart) continue;
-          if (!node.textContent.trim().length) continue;
+        let pendingKatex = null;
+
+        const makeMark = () => {
           const mark = document.createElement('mark');
           mark.className = 'comment-highlight' + (this.activeCommentId === comment.id ? ' active' : '');
           mark.dataset.commentId = comment.id;
@@ -429,12 +429,49 @@ export const highlights = {
             this.scrollToComment(comment.id);
             this.showCommentsPanel();
           };
+          return mark;
+        };
+
+        const flushKatex = () => {
+          if (!pendingKatex) return;
+          const mark = makeMark();
+          const r = document.createRange();
+          r.selectNode(pendingKatex);
+          r.surroundContents(mark);
+          marks.push(mark);
+          pendingKatex = null;
+        };
+
+        for (let i = startIdx; i <= endIdx; i++) {
+          const info = boundaries[i];
+          if (info.isImg) continue;
+          const node = info.node;
+          // Batch entire KaTeX render trees as a single highlight so we
+          // don't fragment the formula into dozens of tiny marks whose
+          // border-bottom positions vary (creating a jagged underline).
+          const katexEl = node.nodeType === Node.TEXT_NODE && node.parentElement
+            ? node.parentElement.closest('.katex')
+            : null;
+          if (katexEl) {
+            if (pendingKatex === katexEl) continue;
+            flushKatex();
+            pendingKatex = katexEl;
+            continue;
+          }
+          flushKatex();
+
+          const nodeStart = Math.max(quoteStart, info.start) - info.start;
+          const nodeEnd = Math.min(quoteEnd, info.end) - info.start;
+          if (nodeEnd <= nodeStart) continue;
+          if (!node.textContent.trim().length) continue;
+          const mark = makeMark();
           const r = document.createRange();
           r.setStart(node, nodeStart);
           r.setEnd(node, nodeEnd);
           r.surroundContents(mark);
           marks.push(mark);
         }
+        flushKatex();
         if (marks.length === 0) throw new Error('no text nodes to wrap');
         // Merge adjacent marks so the highlight looks continuous
         for (let i = marks.length - 1; i > 0; i--) {

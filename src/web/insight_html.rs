@@ -29,20 +29,23 @@ static FENCED_CODE_RE: LazyLock<Regex> =
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`\n]+?`").unwrap());
 
 static EXTERNAL_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"!\[([\s\S]*?)\]\((https?://[^)\s]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)?\)"#).unwrap()
+    Regex::new(r#"!\[([\s\S]*?)\]\((https?://[^)\s]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)"#).unwrap()
 });
 
 static PAGE_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"!\[([\s\S]*?)\]\(page://(\d+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)?\)"#).unwrap()
+    Regex::new(r#"!\[([\s\S]*?)\]\(page://(\d+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)"#).unwrap()
 });
 
 static FIGURE_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"!\[([\s\S]*?)\]\(figure/([a-zA-Z0-9_.-]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)?\)"#).unwrap()
+    Regex::new(r#"!\[([\s\S]*?)\]\(figure/([a-zA-Z0-9_.-]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)"#).unwrap()
 });
 
 static TABLE_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"!\[([\s\S]*?)\]\(table/([a-zA-Z0-9_.-]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)?\)"#).unwrap()
+    Regex::new(r#"!\[([\s\S]*?)\]\(table/([a-zA-Z0-9_.-]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)"#).unwrap()
 });
+
+static ROTATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"rotate\s*=\s*(90|180|270)").unwrap());
 
 static CJK_AUTOLINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<a([^>]*)>(https?://[^\s<]+?)([\u{4e00}-\u{9fff}\u{3000}-\u{303f}\u{ff00}-\u{ffef}][^<]*?)</a>"#).unwrap()
@@ -234,6 +237,7 @@ struct PageImage {
     width: Option<String>,
     height: Option<String>,
     align: String,
+    rotate: Option<i32>,
 }
 
 enum PageImageKind {
@@ -343,6 +347,113 @@ fn dim_unit(v: &str) -> String {
     }
 }
 
+/// Parse the image title for `rotate=90/180/270` and return the angle in
+/// degrees. Only 90/180/270 are supported.
+fn parse_rotate(title: &Option<String>) -> Option<i32> {
+    let t = title.as_deref()?;
+    ROTATE_RE.captures(t).and_then(|c| c[1].parse().ok())
+}
+
+/// Build CSS styles for a 90/270-degree rotated image when its natural
+/// dimensions are known. Returns `(wrapper_prefix, box_style, rot_style,
+/// img_style)`.
+///
+/// The user-supplied dimensions describe the **final on-screen (visual) box**,
+/// i.e. what the reader sees after rotation — so `=47%` always means the
+/// displayed image is 47% wide, rotated or not.
+///
+/// Layout is three nested layers, each with a single responsibility:
+/// - **box** (`box_style`): the visual box, sized to the swapped aspect ratio
+///   (a 90/270 turn swaps width and height) with `overflow:hidden` clipping.
+/// - **rot** (`rot_style`): an absolutely-centered, un-rotated box that keeps
+///   the *original* aspect ratio and is rotated to fill the box. Its
+///   `width:100%` + `aspect-ratio` make its area equal to the box, so it fills
+///   it exactly after rotation.
+/// - **img** (`img_style`): a plain `100%×100%` fill of the rot box — no
+///   `calc`, no `max-width` hack.
+///
+/// Using `aspect-ratio` (the same mechanism) for both box and rot, and pure
+/// `100%` for the img, avoids the two independent sizing calculations
+/// (`aspect-ratio` on the box vs `calc(x/y*100%)` on the img) that caused
+/// sub-pixel mismatches and visible stretching.
+///
+/// When `width_on_wrapper` is true (floated left/right), the user width is
+/// emitted on the *wrapper* via `wrapper_prefix` and the box uses `width:100%`
+/// — this keeps the percentage resolving against the text column. When false
+/// (centered), the user width stays on the box itself.
+fn rotated_image_styles(
+    user_w: &str,
+    user_h: &str,
+    img_w: u32,
+    img_h: u32,
+    deg: i32,
+    width_on_wrapper: bool,
+) -> Option<(String, String, String, String)> {
+    if img_w == 0 || img_h == 0 {
+        return None;
+    }
+    let has_w = !user_w.is_empty();
+    let has_h = !user_h.is_empty();
+
+    // Visual (rotated) box aspect ratio = img_h / img_w (swapped): a 90/270
+    // turn swaps the original width and height.
+    let visual_ratio = format!("{} / {}", img_h, img_w);
+
+    // For floated images the percentage width must live on the wrapper (so it
+    // resolves against the text column); the box then fills the wrapper. For
+    // centered images the box carries the width directly (resolving against the
+    // full-width centered container).
+    let wrapper_prefix = if width_on_wrapper && has_w {
+        format!("width:{};", user_w)
+    } else {
+        String::new()
+    };
+    let box_w = if width_on_wrapper {
+        "width:100%;".to_string()
+    } else if has_w {
+        format!("width:{};", user_w)
+    } else {
+        String::new()
+    };
+
+    let box_sizing = match (has_w, has_h) {
+        (true, true) => format!("{}height:{};", box_w, user_h),
+        (true, false) => format!("{}aspect-ratio:{};", box_w, visual_ratio),
+        (false, true) => format!("height:{};aspect-ratio:{};", user_h, visual_ratio),
+        (false, false) => format!("width:{}px;aspect-ratio:{};", img_h, visual_ratio),
+    };
+    // display:block + margin:auto centers a fixed-width block inside the
+    // centered wrapper (text-align:center has no effect on block boxes). For
+    // floated images the box is width:100% so centering is a no-op.
+    let center = if width_on_wrapper { "" } else { "margin:auto;" };
+    let box_style = format!(
+        "{}overflow:hidden;position:relative;display:block;{}",
+        box_sizing, center
+    );
+
+    // The rot box must be the box's dimensions with width/height swapped
+    // (H_box x W_box), so that a 90/270 rotation fills the box exactly:
+    //   box:  W_box x H_box,  H_box = W_box * (img_w / img_h)
+    //   rot:  H_box x W_box  =  calc(img_w/img_h * 100%) wide
+    //                            x calc(img_h/img_w * 100%) tall
+    // (percentages resolve against the box: width % vs box width, height % vs
+    // box height). Both factors reproduce the original img_w:img_h ratio, so
+    // the un-rotated rot box has the image's true aspect and is not distorted.
+    let rot_w = format!("calc({} / {} * 100%)", img_w, img_h);
+    let rot_h = format!("calc({} / {} * 100%)", img_h, img_w);
+    let rot_style = format!(
+        "position:absolute;left:50%;top:50%;width:{};height:{};transform:translate(-50%,-50%) rotate({}deg);transform-origin:center;",
+        rot_w, rot_h, deg
+    );
+
+    // Plain fill of the rot box. width/height:100% stay within the rot box, so
+    // the `.progressive-img` `max-width:100%` never clamps; the inline
+    // height:100% overrides its `height:auto`.
+    let img_style = "position:absolute;inset:0;width:100%;height:100%;".to_string();
+
+    Some((wrapper_prefix, box_style, rot_style, img_style))
+}
+
 fn protect_page_images(text: &str, images: &mut Vec<PageImage>) -> String {
     // page://N
     let text = PAGE_IMG_RE
@@ -357,6 +468,7 @@ fn protect_page_images(text: &str, images: &mut Vec<PageImage>) -> String {
                     .map(|m| m.as_str())
                     .unwrap_or("center")
                     .to_string(),
+                rotate: parse_rotate(&caps.get(6).map(|m| m.as_str().to_string())),
             });
             format!("%%PAGEIMG_{}%%", images.len() - 1)
         })
@@ -375,6 +487,7 @@ fn protect_page_images(text: &str, images: &mut Vec<PageImage>) -> String {
                     .map(|m| m.as_str())
                     .unwrap_or("center")
                     .to_string(),
+                rotate: parse_rotate(&caps.get(6).map(|m| m.as_str().to_string())),
             });
             format!("%%PAGEIMG_{}%%", images.len() - 1)
         })
@@ -393,6 +506,7 @@ fn protect_page_images(text: &str, images: &mut Vec<PageImage>) -> String {
                     .map(|m| m.as_str())
                     .unwrap_or("center")
                     .to_string(),
+                rotate: parse_rotate(&caps.get(6).map(|m| m.as_str().to_string())),
             });
             format!("%%PAGEIMG_{}%%", images.len() - 1)
         })
@@ -411,6 +525,7 @@ fn protect_page_images(text: &str, images: &mut Vec<PageImage>) -> String {
                     .map(|m| m.as_str())
                     .unwrap_or("center")
                     .to_string(),
+                rotate: parse_rotate(&caps.get(6).map(|m| m.as_str().to_string())),
             });
             format!("%%PAGEIMG_{}%%", images.len() - 1)
         })
@@ -509,6 +624,108 @@ fn render_math_in_text(text: &str) -> String {
     text.replace("\u{7f}ESCDOLLAR\u{7f}", "$")
 }
 
+/// Inputs for rendering a single block (left/right/center) image.
+struct BlockImage<'a> {
+    rotate: Option<i32>,
+    /// Pre-built `transform:rotate(...);transform-origin:center;` for the `<img>`.
+    img_rotate_style: &'a str,
+    /// User width/height (already unit-suffixed, e.g. "47%", "300px").
+    w: &'a str,
+    h: &'a str,
+    /// Width/height swapped for 90/270 (used by the no-natural-dims fallback).
+    render_w: &'a str,
+    render_h: &'a str,
+    /// Natural pixel dimensions of the source image (0,0 when unknown).
+    img_w: u32,
+    img_h: u32,
+    img_attrs: &'a str,
+    alt: &'a str,
+    /// `true` for left/right (width + `max-width:100%` go on the wrapper),
+    /// `false` for centered (width goes on the `<img>`).
+    floated: bool,
+}
+
+/// Render the inner markup for a block (left/right/center) image plus any extra
+/// CSS that must be merged into the alignment wrapper.
+///
+/// Returns `(extra_wrapper_style, inner_html)`. When the image is rotated
+/// 90/270 with known natural dimensions, `inner_html` is a clipped box nesting
+/// a rotating rot box that holds the `<img>`; otherwise it is the bare `<img>`
+/// and any width/max-width lives on `extra_wrapper_style`.
+fn render_block_image(img: &BlockImage) -> (String, String) {
+    let BlockImage {
+        rotate,
+        img_rotate_style,
+        w,
+        h,
+        render_w,
+        render_h,
+        img_w,
+        img_h,
+        img_attrs,
+        alt,
+        floated,
+    } = *img;
+
+    let mut extra_wrapper = String::new();
+
+    // 90/270 rotation with known natural dims: three-layer box > rot > img.
+    if let Some(deg) = rotate.filter(|d| *d == 90 || *d == 270) {
+        if let Some((wrapper_prefix, box_style, rot_style, img_style)) =
+            rotated_image_styles(w, h, img_w, img_h, deg, floated)
+        {
+            extra_wrapper.push_str(&wrapper_prefix);
+            let img_html = format!(
+                "<img alt=\"{}\" {} style=\"{}\" loading=\"lazy\" decoding=\"async\">",
+                alt, img_attrs, img_style
+            );
+            let inner = format!(
+                "<div style=\"{}\"><div style=\"{}\">{}</div></div>",
+                box_style, rot_style, img_html
+            );
+            return (extra_wrapper, inner);
+        }
+    }
+
+    // Everything else (no rotation, 180, or 90/270 without natural dims): a
+    // bare `<img>` whose width/max-width go on the wrapper or the img itself.
+    let mut img_style = String::new();
+    if rotate == Some(90) || rotate == Some(270) {
+        // 90/270 fallback (external image, no natural dims): swapped box.
+        push_dim(&mut extra_wrapper, "width", render_w);
+        push_dim(&mut extra_wrapper, "height", render_h);
+        push_dim(&mut img_style, "width", w);
+        push_dim(&mut img_style, "height", h);
+        img_style.push_str(img_rotate_style);
+    } else {
+        if floated {
+            push_dim(&mut extra_wrapper, "width", w);
+            extra_wrapper.push_str("max-width:100%;");
+            push_dim(&mut img_style, "height", h);
+            img_style.push_str("max-width:100%;");
+        } else {
+            push_dim(&mut img_style, "width", w);
+            push_dim(&mut img_style, "height", h);
+        }
+        if rotate == Some(180) {
+            img_style.push_str(img_rotate_style);
+        }
+    }
+
+    let img_html = format!(
+        "<img alt=\"{}\" {} style=\"{}\" loading=\"lazy\" decoding=\"async\">",
+        alt, img_attrs, img_style
+    );
+    (extra_wrapper, img_html)
+}
+
+/// Append `prop:value;` to `style` only when `value` is non-empty.
+fn push_dim(style: &mut String, prop: &str, value: &str) {
+    if !value.is_empty() {
+        style.push_str(&format!("{}:{};", prop, value));
+    }
+}
+
 fn restore_page_images(html: &str, source: &str, paper_id: &str, images: &[PageImage]) -> String {
     let mut result = html.to_string();
     let enc_source = urlencoding::encode(source);
@@ -532,13 +749,23 @@ fn restore_page_images(html: &str, source: &str, paper_id: &str, images: &[PageI
         let placeholder = format!("%%PAGEIMG_{}%%", i);
         let w = dim_unit(img.width.as_deref().unwrap_or(""));
         let h = dim_unit(img.height.as_deref().unwrap_or(""));
-        let mut style = String::new();
-        if !w.is_empty() {
-            style.push_str(&format!("width:{};", w));
-        }
-        if !h.is_empty() {
-            style.push_str(&format!("height:{};", h));
-        }
+
+        // Swap width/height for 90/270 degree rotations so the rendered box
+        // matches the rotated image's bounding box.
+        let (render_w, render_h) = if img.rotate == Some(90) || img.rotate == Some(270) {
+            (h.clone(), w.clone())
+        } else {
+            (w.clone(), h.clone())
+        };
+
+        // Build rotation style for the image itself. For block images the
+        // wrapper reserves the swapped bounding box; inline rotation is left
+        // as a TODO because layout semantics are undefined.
+        let rotate = img.rotate;
+        let img_rotate_style = rotate
+            .map(|deg| format!("transform:rotate({}deg);transform-origin:center;", deg))
+            .unwrap_or_default();
+
         // LQIP: use thumb as src, full version in data-full-src
         // Include width/height from actual image for CLS-free layout
         let fig_dir = crate::web::paper_figures_dir(source, paper_id);
@@ -551,8 +778,15 @@ fn restore_page_images(html: &str, source: &str, paper_id: &str, images: &[PageI
             PageImageKind::External(_) => None,
         }
         .unwrap_or((0, 0));
-        let dims_attr = if img_w > 0 && img_h > 0 {
-            format!(" width=\"{}\" height=\"{}\"", img_w, img_h)
+        // Swap intrinsic dimensions for 90/270 degree rotations so the browser
+        // reserves layout space for the rotated visual box.
+        let (attr_w, attr_h) = if img.rotate == Some(90) || img.rotate == Some(270) {
+            (img_h, img_w)
+        } else {
+            (img_w, img_h)
+        };
+        let dims_attr = if attr_w > 0 && attr_h > 0 {
+            format!(" width=\"{}\" height=\"{}\"", attr_w, attr_h)
         } else {
             String::new()
         };
@@ -561,53 +795,69 @@ fn restore_page_images(html: &str, source: &str, paper_id: &str, images: &[PageI
             thumb, src, dims_attr
         );
 
+        // For non-rotated images we preserve the original layout behaviour:
+        // center: width/height on the <img>, wrapper has no sizing;
+        // left/right: width on the wrapper, height on the <img> with max-width:100%.
+        // For rotated images the wrapper gets the swapped bounding box and the
+        // <img> keeps the original dimensions plus the transform.
         let replacement = if img.align == "inline" {
-            let img_style = if style.is_empty() {
-                "vertical-align:middle;".to_string()
+            // TODO: support rotation for inline images.
+            let mut img_style = String::new();
+            if !w.is_empty() {
+                img_style.push_str(&format!("width:{};", w));
+            }
+            if !h.is_empty() {
+                img_style.push_str(&format!("height:{};", h));
+            }
+            if !img_style.is_empty() {
+                img_style.push_str("vertical-align:middle;");
             } else {
-                format!("{}vertical-align:middle;", style)
-            };
+                img_style = "vertical-align:middle;".to_string();
+            }
             format!(
                 "<img alt=\"{}\" {} style=\"{}\" loading=\"lazy\" decoding=\"async\">",
                 escape_html(&img.alt),
                 img_attrs,
                 img_style
             )
-        } else if img.align == "left" || img.align == "right" {
-            let mut wrapper_style = format!("float:{};text-align:center;", img.align);
-            if img.align == "left" {
-                wrapper_style.push_str("margin:0 16px 8px 0;");
-            } else {
-                wrapper_style.push_str("margin:0 0 8px 16px;");
-            }
-            if !w.is_empty() {
-                wrapper_style.push_str(&format!("width:{};", w));
-            }
-            wrapper_style.push_str("max-width:100%;");
-            let img_style = if h.is_empty() {
-                "max-width:100%;".to_string()
-            } else {
-                format!("height:{};max-width:100%;", h)
-            };
-            let caption = render_math_in_text(&img.alt);
-            format!(
-                "<div style=\"{}\"><img alt=\"{}\" {} style=\"{}\" loading=\"lazy\" decoding=\"async\"><div style=\"font-size:13px;color:var(--text3);margin-top:6px;word-break:break-word;\">{}</div></div>",
-                wrapper_style,
-                escape_html(&img.alt),
-                img_attrs,
-                img_style,
-                caption
-            )
         } else {
-            let wrapper_style = "text-align:center;margin:16px 0;";
+            // Block image: left/right (floated) or center.
+            let floated = img.align == "left" || img.align == "right";
+            let mut wrapper_style = if floated {
+                let mut s = format!("float:{};text-align:center;", img.align);
+                if img.align == "left" {
+                    s.push_str("margin:0 16px 8px 0;");
+                } else {
+                    s.push_str("margin:0 0 8px 16px;");
+                }
+                s
+            } else {
+                "text-align:center;margin:16px 0;".to_string()
+            };
+            let (extra, inner) = render_block_image(&BlockImage {
+                rotate,
+                img_rotate_style: &img_rotate_style,
+                w: &w,
+                h: &h,
+                render_w: &render_w,
+                render_h: &render_h,
+                img_w,
+                img_h,
+                img_attrs: &img_attrs,
+                alt: &escape_html(&img.alt),
+                floated,
+            });
+            wrapper_style.push_str(&extra);
             let caption = render_math_in_text(&img.alt);
+            // word-break helps long captions wrap inside a floated (narrow) column.
+            let caption_style = if floated {
+                "font-size:13px;color:var(--text3);margin-top:6px;word-break:break-word;"
+            } else {
+                "font-size:13px;color:var(--text3);margin-top:6px;"
+            };
             format!(
-                "<div style=\"{}\"><img alt=\"{}\" {} style=\"{}\" loading=\"lazy\" decoding=\"async\"><div style=\"font-size:13px;color:var(--text3);margin-top:6px;\">{}</div></div>",
-                wrapper_style,
-                escape_html(&img.alt),
-                img_attrs,
-                style,
-                caption
+                "<div style=\"{}\">{}<div style=\"{}\">{}</div></div>",
+                wrapper_style, inner, caption_style, caption
             )
         };
 
@@ -780,4 +1030,133 @@ fn sanitize_markdown_html(html: &str) -> String {
     // Keep relative URLs intact
     builder.url_relative(ammonia::UrlRelative::PassThrough);
     builder.clean(html).to_string()
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn rotated_centered_keeps_user_width_on_box() {
+        // Centered: `=47%` is the FINAL displayed width, on the box itself.
+        // For a 1000x600 (landscape) image rotated 90deg, the visual box is
+        // portrait: width 47%, aspect-ratio 600/1000.
+        let (wrapper, box_style, rot_style, img_style) =
+            rotated_image_styles("47%", "", 1000, 600, 90, false).expect("natural dims known");
+        assert!(
+            wrapper.is_empty(),
+            "centered image puts width on the box, not the wrapper: {wrapper}"
+        );
+        assert!(
+            box_style.contains("width:47%;aspect-ratio:600 / 1000;"),
+            "visual box must use the user width with swapped aspect: {box_style}"
+        );
+        assert!(
+            box_style.contains("overflow:hidden;position:relative;"),
+            "box must clip and establish positioning context: {box_style}"
+        );
+        // rot box is the box with width/height swapped, so it fills the box
+        // after rotation. Width = calc(img_w/img_h*100%) (= box height),
+        // height = calc(img_h/img_w*100%) (= box width).
+        assert!(
+            rot_style.contains("width:calc(1000 / 600 * 100%);"),
+            "rot width = box height: {rot_style}"
+        );
+        assert!(
+            rot_style.contains("height:calc(600 / 1000 * 100%);"),
+            "rot height = box width: {rot_style}"
+        );
+        assert!(
+            rot_style.contains("transform:translate(-50%,-50%) rotate(90deg);"),
+            "rot box is centered then rotated: {rot_style}"
+        );
+        // img is a plain fill — no calc, no max-width hack.
+        assert!(
+            img_style.contains("width:100%;height:100%;"),
+            "img must be a plain 100% fill: {img_style}"
+        );
+        assert!(
+            !img_style.contains("calc("),
+            "img must not use calc: {img_style}"
+        );
+    }
+
+    #[test]
+    fn rotated_floated_puts_user_width_on_wrapper() {
+        // Floated: the percentage must resolve against the text column, so it
+        // lives on the wrapper and the box fills it (width:100%).
+        let (wrapper, box_style, _rot, _img) =
+            rotated_image_styles("47%", "", 1000, 600, 90, true).unwrap();
+        assert!(
+            wrapper.contains("width:47%;"),
+            "floated image must carry the user width on the wrapper: {wrapper}"
+        );
+        assert!(
+            box_style.contains("width:100%;aspect-ratio:600 / 1000;"),
+            "box must fill the floated wrapper: {box_style}"
+        );
+    }
+
+    #[test]
+    fn rotated_both_dims_use_user_box_as_visual_box() {
+        // User dims describe the final visual box (not swapped).
+        let (_wrapper, box_style, _rot, _img) =
+            rotated_image_styles("400px", "300px", 1000, 600, 270, false).unwrap();
+        assert!(
+            box_style.contains("width:400px;height:300px;"),
+            "visual box = user box: {box_style}"
+        );
+    }
+
+    #[test]
+    fn rotated_unknown_dims_returns_none() {
+        // External images have no natural dimensions -> caller falls back.
+        assert!(rotated_image_styles("47%", "", 0, 0, 90, false).is_none());
+    }
+
+    #[test]
+    fn floated_rotated_image_nests_three_layers() {
+        // The full block render for a floated, rotated image must put the
+        // user width on the wrapper, nest a width:100% clipping box, then a
+        // rot box holding the plain-fill <img>, with the caption as a sibling
+        // of the box (not clipped).
+        let (extra, inner) = render_block_image(&BlockImage {
+            rotate: Some(90),
+            img_rotate_style: "transform:rotate(90deg);transform-origin:center;",
+            w: "47%",
+            h: "",
+            render_w: "",
+            render_h: "47%",
+            img_w: 1000,
+            img_h: 600,
+            img_attrs: "class=\"progressive-img\" src=\"t\"",
+            alt: "fig",
+            floated: true,
+        });
+        assert!(
+            extra.contains("width:47%;"),
+            "wrapper carries the user width: {extra}"
+        );
+        assert!(
+            inner.contains("width:100%;aspect-ratio:600 / 1000;"),
+            "box fills the wrapper: {inner}"
+        );
+        assert!(
+            inner.contains("width:calc(1000 / 600 * 100%);"),
+            "rot width = box height (swapped): {inner}"
+        );
+        assert!(
+            inner.contains("height:calc(600 / 1000 * 100%);"),
+            "rot height = box width (swapped): {inner}"
+        );
+        assert!(
+            inner.contains("width:100%;height:100%;"),
+            "img is a plain fill: {inner}"
+        );
+        // Structure: <div box><div rot><img></div></div>
+        assert!(
+            inner.matches("<div style=\"").count() == 2,
+            "exactly two nested divs (box + rot): {inner}"
+        );
+    }
 }

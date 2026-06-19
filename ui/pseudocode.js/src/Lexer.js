@@ -122,12 +122,22 @@ Lexer.prototype._skip = function (len) {
 /* Get the next atom */
 Lexer.prototype._next = function () {
     var anyWhitespace = false;
+    var newlineBefore = false;
+    var lineIndent = 0;
     while (1) {
         // Skip whitespace (one or more)
         var whitespaceMatch = whitespaceRegex.exec(this._remain);
         if (whitespaceMatch) {
             anyWhitespace = true;
-            var whitespaceLen = whitespaceMatch[0].length;
+            var whitespaceStr = whitespaceMatch[0];
+            var newlineIndex = whitespaceStr.lastIndexOf('\n');
+            if (newlineIndex !== -1) {
+                newlineBefore = true;
+                // Number of whitespace characters after the most recent newline.
+                // This gives the visual indentation of the line this atom starts on.
+                lineIndent = whitespaceStr.length - (newlineIndex + 1);
+            }
+            var whitespaceLen = whitespaceStr.length;
             this._skip(whitespaceLen);
         }
 
@@ -147,6 +157,8 @@ Lexer.prototype._next = function () {
             type: 'EOF',
             text: null,
             whitespace: false,
+            newlineBefore: false,
+            lineIndent: 0,
         };
         return false;
     }
@@ -166,6 +178,8 @@ Lexer.prototype._next = function () {
             type: type, /* special, func, open, close, ordinary, math */
             text: usefulText, /* the text value of the atom */
             whitespace: anyWhitespace, /* any whitespace before the atom */
+            newlineBefore: newlineBefore, /* does this atom start a new line? */
+            lineIndent: lineIndent, /* indentation if it starts a new line */
         };
 
         this._pos += matchText.length;

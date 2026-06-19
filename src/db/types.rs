@@ -20,7 +20,8 @@ pub struct DbPaper {
     pub score: f32,
     pub paper_type: String,
     pub summary: String,
-    pub r#abstract: String,
+    pub abstract_zh: String,
+    pub abstract_en: String,
     pub insight: String,
     pub processed_at: DateTime<Utc>,
     pub insight_processed_at: Option<DateTime<Utc>>,
@@ -43,7 +44,7 @@ pub struct DbPaperListItem {
     pub score: f32,
     pub paper_type: String,
     pub summary: String,
-    pub r#abstract: String,
+    pub abstract_zh: String,
     pub processed_at: DateTime<Utc>,
     pub insight_processed_at: Option<DateTime<Utc>>,
     pub insight_reviewed_at: Option<DateTime<Utc>>,
@@ -105,7 +106,7 @@ pub struct PaperByDate {
     pub id: String,
     pub title: String,
     pub authors: Vec<String>,
-    pub r#abstract: String,
+    pub abstract_zh: String,
     pub score: f32,
     pub mark: Option<String>,
     pub source_type: Option<String>,
@@ -118,7 +119,8 @@ pub struct DbPaperUpdate {
     pub score: Option<f32>,
     pub paper_type: Option<String>,
     pub summary: Option<String>,
-    pub r#abstract: Option<String>,
+    pub abstract_zh: Option<String>,
+    pub abstract_en: Option<String>,
     pub insight: Option<String>,
     pub insight_processed_at: Option<DateTime<Utc>>,
     pub insight_review: Option<String>,
@@ -150,11 +152,39 @@ pub fn is_valid_insight(insight: &str) -> bool {
         && !insight.starts_with("MinerU API not configured")
 }
 
-pub fn cleanup_text(s: &str) -> String {
+/// Normalize text without converting quotes.
+///
+/// Performs whitespace cleanup (collapses three-or-more newlines to two),
+/// inserts a space between `)` and a following CJK character, and adds
+/// separating spaces between CJK and ASCII/alphanumeric runs. Leaves all
+/// quote characters untouched.
+///
+/// This is the default normalizer for most fields: titles, paper types,
+/// insights, reviews, revisions, etc.
+pub fn normalize_text(s: &str) -> String {
+    normalize_text_impl(s, false)
+}
+
+/// Normalize text and convert English/curly double quotes to CJK corner brackets.
+///
+/// Use this only for **summary and abstract fields** where the product rule
+/// requires quotes to be rendered as `「 」`. All other fields should use the
+/// default [`normalize_text`].
+pub fn normalize_text_convert_quotes(s: &str) -> String {
+    normalize_text_impl(s, true)
+}
+
+fn normalize_text_impl(s: &str, convert_quotes: bool) -> String {
     let mut s = s.replace("\r\n", "\n");
     while s.contains("\n\n\n") {
         s = s.replace("\n\n\n", "\n\n");
     }
+    // Replace English/curly double quotes with Chinese corner brackets 「 」.
+    if convert_quotes {
+        s = replace_double_quotes(&s);
+    }
+    // Insert space between ) and following CJK character: "Google (Alphabet)完成了" → "Google (Alphabet) 完成了"
+    s = insert_space_after_close_paren(&s);
     let s = s.trim();
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len() * 2);
@@ -177,4 +207,67 @@ pub fn cleanup_text(s: &str) -> String {
 
 pub(super) fn is_cjk(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+/// Replace English/curly double quotes with Chinese corner brackets 「 」.
+///
+/// Handles three patterns:
+/// - `"..."` — straight ASCII double quotes
+/// - `\u{201C}...\u{201D}` — curly left/right double quotes
+/// - Unmatched opening quote → `「` at end of run
+///
+/// Quotes appearing inside HTML tags (`<...>`) are left untouched, since they
+/// are attribute delimiters, not body punctuation. Without this guard, a
+/// `<div style="text-align:right">` would be mangled into
+/// `<div style=「text-align:right」>` whenever a user re-saves an insight
+/// that already contains our auto-appended footer.
+fn replace_double_quotes(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut open = false;
+    let mut in_tag = false;
+    for &ch in &chars {
+        match ch {
+            '<' => {
+                in_tag = true;
+                out.push(ch);
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(ch);
+            }
+            // Straight ASCII double quote
+            '"' if !in_tag => {
+                out.push(if open { '\u{300D}' } else { '\u{300C}' });
+                open = !open;
+            }
+            // Curly left double quote \u{201C}
+            '\u{201C}' if !in_tag => {
+                out.push('\u{300C}');
+                open = true;
+            }
+            // Curly right double quote \u{201D}
+            '\u{201D}' if !in_tag => {
+                out.push('\u{300D}');
+                open = false;
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Insert a space between `)` and a following CJK character.
+///
+/// Handles: `Google (Alphabet)完成了` → `Google (Alphabet) 完成了`
+fn insert_space_after_close_paren(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 16);
+    for i in 0..chars.len() {
+        out.push(chars[i]);
+        if chars[i] == ')' && i + 1 < chars.len() && is_cjk(chars[i + 1]) {
+            out.push(' ');
+        }
+    }
+    out
 }

@@ -24,6 +24,135 @@ const MIN_DISCARDED_TEXT_CHARS: usize = 10;
 const MIN_FREE_FOR_EXPANSION: f32 = 50.0;
 const MIN_TOP_FROM_PAGE: f32 = 50.0;
 
+/// Minimum dimensions for an `interline_equation` block to be considered as a
+/// synthetic figure body.  Inline-sized equations (narrow/tiny) are ignored.
+const SYNTH_FIG_MIN_W: f32 = 60.0;
+const SYNTH_FIG_MIN_H: f32 = 20.0;
+const SYNTH_FIG_MIN_AREA: f32 = 1200.0;
+
+/// Synthesize an `image` candidate from a nearby `interline_equation` block for
+/// a figure-caption orphan that cannot be rebound because MinerU typed the
+/// figure body as equations rather than an image/chart block.
+///
+/// Example: 2304.10557 Figure 4 is a multi-equation schematic.  Its caption
+/// appears in a normal `text` block while the body is an `interline_equation`
+/// block that MinerU did extract an image for.  Without this fallback the
+/// caption remains an orphan and the figure is lost.
+pub fn synthesize_equation_figure_for_orphan(
+    page: &crate::mineru::LayoutPage,
+    cap_text: &str,
+    cap_bbox: [f32; 4],
+    candidates: &[RawBlock],
+) -> Option<RawBlock> {
+    let cap_num = extract_caption_number(cap_text)?;
+    if !cap_num.starts_with("F:") {
+        return None;
+    }
+
+    // Only synthesize if this page has no real image/chart candidate.  If an
+    // image/chart exists, the orphan should rebind to it instead.
+    let has_fig_candidate = candidates.iter().any(|c| {
+        c.page_idx == page.page_idx && (c.block_type == "image" || c.block_type == "chart")
+    });
+    if has_fig_candidate {
+        return None;
+    }
+
+    let cap_top = cap_bbox[1].min(cap_bbox[3]);
+    let cap_bottom = cap_bbox[1].max(cap_bbox[3]);
+    let cap_left = cap_bbox[0].min(cap_bbox[2]);
+    let cap_right = cap_bbox[0].max(cap_bbox[2]);
+    let cap_h = (cap_bottom - cap_top).max(1.0);
+
+    // Pick the best interline_equation block: vertically aligned with the
+    // caption and large enough to be a figure body.
+    let mut best_idx: Option<usize> = None;
+    let mut best_score = f32::NEG_INFINITY;
+    for (idx, block) in page.para_blocks.iter().enumerate() {
+        if block.block_type != "interline_equation" || block.bbox.len() < 4 {
+            continue;
+        }
+        if page.resolve_image_path(block).is_none() {
+            continue;
+        }
+        let b_top = block.bbox[1].min(block.bbox[3]);
+        let b_bottom = block.bbox[1].max(block.bbox[3]);
+        let b_left = block.bbox[0].min(block.bbox[2]);
+        let b_right = block.bbox[0].max(block.bbox[2]);
+        let b_w = (b_right - b_left).abs();
+        let b_h = (b_bottom - b_top).abs();
+        let area = b_w * b_h;
+        if b_w < SYNTH_FIG_MIN_W || b_h < SYNTH_FIG_MIN_H || area < SYNTH_FIG_MIN_AREA {
+            continue;
+        }
+
+        let v_overlap = (cap_bottom.min(b_bottom) - cap_top.max(b_top)).max(0.0);
+        let v_dist = if b_bottom < cap_top {
+            cap_top - b_bottom
+        } else if b_top > cap_bottom {
+            b_top - cap_bottom
+        } else {
+            0.0
+        };
+        // Allow the caption to sit slightly above/below the equation body.
+        if v_dist > cap_h.max(b_h) * 0.5 + 30.0 {
+            continue;
+        }
+
+        let h_dist = if b_right < cap_left {
+            cap_left - b_right
+        } else if b_left > cap_right {
+            b_left - cap_right
+        } else {
+            0.0
+        };
+
+        // Score favours vertical overlap and proximity; area breaks ties.
+        let score = v_overlap - h_dist * 0.3 + area * 0.001;
+        if score > best_score {
+            best_score = score;
+            best_idx = Some(idx);
+        }
+    }
+
+    let block = best_idx?;
+    let block = &page.para_blocks[block];
+    let img_path = page.resolve_image_path(block).unwrap_or_default();
+    if img_path.is_empty() {
+        return None;
+    }
+
+    let body_bbox = [
+        block.bbox[0].min(block.bbox[2]),
+        block.bbox[1].min(block.bbox[3]),
+        block.bbox[0].max(block.bbox[2]),
+        block.bbox[1].max(block.bbox[3]),
+    ];
+    let bbox = union_bbox(body_bbox, cap_bbox);
+
+    pp_info(&format!(
+        "[mineru] Synthesized figure candidate from interline_equation on page {}: cap='{}' bbox=[{:.1},{:.1},{:.1},{:.1}] body=[{:.1},{:.1},{:.1},{:.1}]",
+        page.page_idx + 1,
+        &cap_text[..cap_text
+            .char_indices()
+            .nth(60)
+            .map(|(i, _)| i)
+            .unwrap_or(cap_text.len())],
+        bbox[0], bbox[1], bbox[2], bbox[3],
+        body_bbox[0], body_bbox[1], body_bbox[2], body_bbox[3]
+    ));
+
+    Some(RawBlock {
+        bbox,
+        body_bbox,
+        block_type: "image".to_string(),
+        img_path,
+        desc: cap_text.to_string(),
+        page_idx: page.page_idx,
+        caption_number: Some(cap_num),
+    })
+}
+
 pub struct MinerUClient {
     pub(crate) client: reqwest::Client,
     base_url: String,
@@ -455,6 +584,10 @@ impl MinerUClient {
             model_version: Some("vlm".to_string()),
             no_cache: self.no_cache,
         };
+        pp_info(&format!(
+            "[mineru] POST {} params: url={}, is_ocr=true, language=el, model_version=vlm, no_cache={}",
+            url, pdf_url, self.no_cache
+        ));
         let resp = self
             .client
             .post(&url)
@@ -795,7 +928,64 @@ impl MinerUClient {
                                             .join(" ");
                                         looks_like_caption_header(&other_text)
                                     });
-                                    has_nearby_caption
+                                    // Layout (2): when a figure's grid of glyphs is OCR'd
+                                    // into a LaTeX array (so MinerU types the block
+                                    // `interline_equation`), the "Figure N" caption is often
+                                    // absorbed by an adjacent image/table block as an
+                                    // above-body `*_caption` sub-block rather than left as a
+                                    // standalone para_block (e.g. 1502.04623 page 7: Figure 8's
+                                    // two-digit MNIST grid sits above Figure 9, whose image
+                                    // block swallows the "Figure 8" line).  Detect that
+                                    // mis-nested caption sitting just below this equation so
+                                    // the block is still recovered as a candidate; the
+                                    // absorbed caption is re-emitted as an orphan by
+                                    // `orphan_captions` and rebound to it downstream.
+                                    let has_nested_caption =
+                                        !has_nearby_caption && block.bbox.len() >= 4 && {
+                                            let inter_bottom = block.bbox[1].max(block.bbox[3]);
+                                            let inter_left = block.bbox[0].min(block.bbox[2]);
+                                            let inter_right = block.bbox[0].max(block.bbox[2]);
+                                            page.para_blocks.iter().any(|other| {
+                                                if !matches!(
+                                                    other.block_type.as_str(),
+                                                    "image" | "table" | "chart"
+                                                ) {
+                                                    return false;
+                                                }
+                                                other.all_subs().iter().any(|sub| {
+                                                    if sub.is_body()
+                                                        || !sub.sub_type.ends_with("_caption")
+                                                        || sub.bbox.len() < 4
+                                                    {
+                                                        return false;
+                                                    }
+                                                    let cap_top = sub.bbox[1].min(sub.bbox[3]);
+                                                    if cap_top <= inter_bottom
+                                                        || cap_top - inter_bottom > 25.0
+                                                    {
+                                                        return false;
+                                                    }
+                                                    let cap_left = sub.bbox[0].min(sub.bbox[2]);
+                                                    let cap_right = sub.bbox[0].max(sub.bbox[2]);
+                                                    let h_overlap = (inter_right.min(cap_right)
+                                                        - inter_left.max(cap_left))
+                                                    .max(0.0);
+                                                    if h_overlap < 20.0 {
+                                                        return false;
+                                                    }
+                                                    let text: String = sub
+                                                        .lines
+                                                        .iter()
+                                                        .flat_map(|l| &l.spans)
+                                                        .filter_map(|s| s.content.as_ref())
+                                                        .cloned()
+                                                        .collect::<Vec<_>>()
+                                                        .join(" ");
+                                                    looks_like_caption_header(&text)
+                                                })
+                                            })
+                                        };
+                                    has_nearby_caption || has_nested_caption
                                 };
                             if block.block_type == "image"
                                 || block.block_type == "table"
@@ -1126,14 +1316,28 @@ impl MinerUClient {
                                         page.page_idx, block.block_type, body_bbox, full_bb, bbox
                                     ));
                                     // Use layout.json caption (spatially validated).
+                                    let block_type = if block.should_reclassify_table_as_image() {
+                                        pp_info(&format!(
+                                            "[mineru] reclassifying table as image on page {}: bbox={:?}",
+                                            page.page_idx + 1,
+                                            block.bbox
+                                        ));
+                                        "image".to_string()
+                                    } else {
+                                        block.block_type.clone()
+                                    };
                                     let layout_caption = block.caption();
                                     let _spatially_invalid = block.has_caption_above_image();
                                     let desc = layout_caption.unwrap_or_default();
                                     let mut desc = if desc.is_empty() {
                                         format!(
-                                            "{} on page {}",
-                                            block.block_type,
-                                            page.page_idx + 1
+                                            "{} on page {}, bbox[{}, {}, {}, {}]",
+                                            block_type,
+                                            page.page_idx + 1,
+                                            body_bbox[0],
+                                            body_bbox[1],
+                                            body_bbox[2],
+                                            body_bbox[3],
                                         )
                                     } else {
                                         desc
@@ -1151,7 +1355,7 @@ impl MinerUClient {
                                     candidates.push(RawBlock {
                                         bbox,
                                         body_bbox,
-                                        block_type: block.block_type.clone(),
+                                        block_type,
                                         img_path,
                                         desc: desc.clone(),
                                         page_idx: page.page_idx,
@@ -1247,7 +1451,22 @@ impl MinerUClient {
                         }
 
                         // Re-bind orphan captions to the nearest bare image above them.
+                        // Before rebind, try to recover figures whose body was typed as
+                        // interline_equation (e.g. 2304.10557 Figure 4).
                         if !orphan_caps.is_empty() {
+                            for (cap_text, cap_bbox, cap_page) in &orphan_caps {
+                                if *cap_page != page.page_idx {
+                                    continue;
+                                }
+                                if let Some(synth) = synthesize_equation_figure_for_orphan(
+                                    page,
+                                    cap_text,
+                                    *cap_bbox,
+                                    &candidates,
+                                ) {
+                                    candidates.push(synth);
+                                }
+                            }
                             rebind_orphan_captions(&mut candidates, &orphan_caps, split_figures);
                         }
 
@@ -1512,9 +1731,7 @@ impl MinerUClient {
                                 // checking "which side of the boundary" fails.
                                 // Instead we check if the boundary is between
                                 // the two edges that form the h_gap.
-                                let cols = page_columns
-                                    .get(&page.page_idx)
-                                    .map(|v| v.as_slice());
+                                let cols = page_columns.get(&page.page_idx).map(|v| v.as_slice());
                                 if let Some(cols) = cols {
                                     let crosses = cols.iter().any(|&b| {
                                         // Check if the column boundary
@@ -1523,10 +1740,8 @@ impl MinerUClient {
                                         //
                                         // 1) Boundary in the gap ±4pt between
                                         //    body and block edges.
-                                        let lo =
-                                            body_right.min(block_left) - 4.0;
-                                        let hi =
-                                            body_right.max(block_left) + 4.0;
+                                        let lo = body_right.min(block_left) - 4.0;
+                                        let hi = body_right.max(block_left) + 4.0;
                                         if b > lo && b < hi {
                                             return true;
                                         }
@@ -1535,15 +1750,10 @@ impl MinerUClient {
                                         //    when MinerU bbox extends a few
                                         //    pt past the column gutter), and
                                         //    the block sits clearly past it.
-                                        let body_past =
-                                            body_right > b
-                                                && body_left < b;
-                                        let block_past =
-                                            block_left - b > 3.0;
-                                        let block_past_rev =
-                                            b - block_right > 3.0;
-                                        body_past
-                                            && (block_past || block_past_rev)
+                                        let body_past = body_right > b && body_left < b;
+                                        let block_past = block_left - b > 3.0;
+                                        let block_past_rev = b - block_right > 3.0;
+                                        body_past && (block_past || block_past_rev)
                                     });
                                     if crosses {
                                         pp_info(&format!(
@@ -1689,6 +1899,19 @@ impl MinerUClient {
                             let body_top = c.body_bbox[1].min(c.body_bbox[3]);
                             let body_left = c.body_bbox[0].min(c.body_bbox[2]);
                             let body_right = c.body_bbox[0].max(c.body_bbox[2]);
+                            // Skip figures whose caption sits ABOVE the body
+                            // (e.g. 2306.17844 Figure 20).  The space directly
+                            // above body_top is then the caption strip, not
+                            // empty space or a sliced-off label row, so snapping
+                            // up would pull caption text into body_bbox.  The
+                            // full crop bbox already starts at the caption, so
+                            // no upward expansion is needed.  We detect this by
+                            // the full bbox top sitting clearly above body_top
+                            // (for caption-below figures the two coincide).
+                            let full_top = c.bbox[1].min(c.bbox[3]);
+                            if full_top < body_top - 2.0 {
+                                continue;
+                            }
                             // Does this page carry a recurring page-header?
                             let page_has_header = page
                                 .discarded_blocks
@@ -1855,7 +2078,7 @@ impl MinerUClient {
                             new_top
                         ));
                     }
-                    swap_mismatched_captions(&mut processed);
+                    swap_mismatched_captions(&mut processed, split_figures);
                     // Second-pass orphan rebind: after merging sub-panels and
                     // swapping mismatched captions, merged candidates are wider
                     // and can match full-width orphan captions that failed the

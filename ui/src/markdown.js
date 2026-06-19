@@ -180,45 +180,71 @@ export const markdown = {
     // Protect page:// image references before marked parsing
     const pageImages = [];
     const dimUnit = (v) => { if (!v) return ''; if (/^\d+(\.\d+)?$/.test(v)) return v + 'px'; return v; };
+    const parseRotate = (title) => {
+      if (!title) return null;
+      const m = title.match(/rotate\s*=\s*(90|180|270)/);
+      return m ? parseInt(m[1], 10) : null;
+    };
     // Pre-render external images with explicit dimensions before marked parsing
-    let safe = text.replace(/!\[([\s\S]*?)\]\((https?:\/\/[^)\s]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)??\)/g, (match, alt, url, w, h, align) => {
+    let safe = text.replace(/!\[([\s\S]*?)\]\((https?:\/\/[^)\s]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)/g, (match, alt, url, w, h, align, title) => {
       const safeUrl = this.escapeUrlAttr(url);
       if (!safeUrl) return this.escape(match);
-      let style = '';
-      if (w) style += `width:${dimUnit(w)};`;
-      if (h) style += `height:${dimUnit(h)};`;
+      const rotate = parseRotate(title);
+      const swap = rotate === 90 || rotate === 270;
+      const renderW = swap ? h : w;
+      const renderH = swap ? w : h;
+      const rotateStyle = rotate ? `transform:rotate(${rotate}deg);transform-origin:center;` : '';
       if (!align) {
-        const styleAttr = style ? ` style="${style}"` : '';
+        let imgStyle = '';
+        if (w) imgStyle += `width:${dimUnit(w)};`;
+        if (h) imgStyle += `height:${dimUnit(h)};`;
+        imgStyle += rotateStyle;
+        const styleAttr = imgStyle ? ` style="${imgStyle}"` : '';
         return `<img alt="${this.escape(alt)}" src="${safeUrl}"${styleAttr} loading="lazy" decoding="async">`;
       }
       if (align === 'inline') {
-        return `<img alt="${this.escape(alt)}" src="${safeUrl}" style="${style}vertical-align:middle;" loading="lazy" decoding="async">`;
+        // TODO: support rotation for inline images.
+        let imgStyle = '';
+        if (w) imgStyle += `width:${dimUnit(w)};`;
+        if (h) imgStyle += `height:${dimUnit(h)};`;
+        imgStyle += 'vertical-align:middle;';
+        return `<img alt="${this.escape(alt)}" src="${safeUrl}" style="${imgStyle}" loading="lazy" decoding="async">`;
       }
       let wrapperStyle = '';
       if (align === 'left') wrapperStyle = 'float:left;margin:0 16px 8px 0;text-align:center;';
       else if (align === 'right') wrapperStyle = 'float:right;margin:0 0 8px 16px;text-align:center;';
       else wrapperStyle = 'text-align:center;margin:16px 0;';
-      if (w) wrapperStyle += `width:${dimUnit(w)};`;
-      wrapperStyle += 'max-width:100%;';
 
-      let imgOnlyStyle = '';
-      if (h) imgOnlyStyle += `height:${dimUnit(h)};`;
-      const imgStyle = imgOnlyStyle ? ` style="${imgOnlyStyle}max-width:100%;"` : ' style="max-width:100%;"';
-      return `<div style="${wrapperStyle}"><img alt="${this.escape(alt)}" src="${safeUrl}"${imgStyle}><div style="font-size:13px;color:var(--text3);margin-top:6px;word-break:break-word;">${this.escape(alt)}</div></div>`;
+      let imgStyle = '';
+      if (rotate) {
+        if (renderW) wrapperStyle += `width:${dimUnit(renderW)};`;
+        if (renderH) wrapperStyle += `height:${dimUnit(renderH)};`;
+        if (w) imgStyle += `width:${dimUnit(w)};`;
+        if (h) imgStyle += `height:${dimUnit(h)};`;
+        imgStyle += rotateStyle;
+      } else {
+        if (w) wrapperStyle += `width:${dimUnit(w)};`;
+        wrapperStyle += 'max-width:100%;';
+        if (h) imgStyle += `height:${dimUnit(h)};`;
+        imgStyle += 'max-width:100%;';
+      }
+
+      const imgStyleAttr = imgStyle ? ` style="${imgStyle}"` : '';
+      return `<div style="${wrapperStyle}"><img alt="${this.escape(alt)}" src="${safeUrl}"${imgStyleAttr} loading="lazy" decoding="async"><div style="font-size:13px;color:var(--text3);margin-top:6px;word-break:break-word;">${this.escape(alt)}</div></div>`;
     });
-    // Protect page:// image references before marked parsing (supports =WxH dimension suffix and align)
-    safe = safe.replace(/!\[([\s\S]*?)\]\(page:\/\/(\d+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)??\)/g, (match, alt, page, w, h, align) => {
-      pageImages.push({ alt, page, type: 'page', width: w || undefined, height: h || undefined, align: align || 'center' });
+    // Protect page:// image references before marked parsing (supports =WxH dimension suffix, align and title)
+    safe = safe.replace(/!\[([\s\S]*?)\]\(page:\/\/(\d+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)/g, (match, alt, page, w, h, align, title) => {
+      pageImages.push({ alt, page, type: 'page', width: w || undefined, height: h || undefined, align: align || 'center', rotate: parseRotate(title) });
       return `%%PAGEIMG_${pageImages.length - 1}%%`;
     });
-    // Protect figure/{name} image references before marked parsing (supports =WxH dimension suffix and align)
-    safe = safe.replace(/!\[([\s\S]*?)\]\(figure\/([a-zA-Z0-9_.-]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)??\)/g, (match, alt, name, w, h, align) => {
-      pageImages.push({ alt, name, type: 'figure', width: w || undefined, height: h || undefined, align: align || 'center' });
+    // Protect figure/{name} image references before marked parsing (supports =WxH dimension suffix, align and title)
+    safe = safe.replace(/!\[([\s\S]*?)\]\(figure\/([a-zA-Z0-9_.-]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)/g, (match, alt, name, w, h, align, title) => {
+      pageImages.push({ alt, name, type: 'figure', width: w || undefined, height: h || undefined, align: align || 'center', rotate: parseRotate(title) });
       return `%%PAGEIMG_${pageImages.length - 1}%%`;
     });
-    // Protect table/{name} image references before marked parsing (supports =WxH dimension suffix and align)
-    safe = safe.replace(/!\[([\s\S]*?)\]\(table\/([a-zA-Z0-9_.-]+)(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?(?:\s+(left|right|inline|center))?)??\)/g, (match, alt, name, w, h, align) => {
-      pageImages.push({ alt, name, type: 'table', width: w || undefined, height: h || undefined, align: align || 'center' });
+    // Protect table/{name} image references before marked parsing (supports =WxH dimension suffix, align and title)
+    safe = safe.replace(/!\[([\s\S]*?)\]\(table\/([a-zA-Z0-9_.-]+)(?:(?:\s*=\s*(\d*(?:\.\d+)?(?:%|px)?)(?:x(\d*(?:\.\d+)?(?:%|px)?))?)?(?:\s+(left|right|inline|center))?(?:\s+"([^"]*)")?)?\)/g, (match, alt, name, w, h, align, title) => {
+      pageImages.push({ alt, name, type: 'table', width: w || undefined, height: h || undefined, align: align || 'center', rotate: parseRotate(title) });
       return `%%PAGEIMG_${pageImages.length - 1}%%`;
     });
     // Convert algorithm environments to HTML via pseudocode.js before marked parsing.
@@ -345,40 +371,74 @@ export const markdown = {
       const dimUnit = (v) => { if (!v) return ''; if (/^\d+(\.\d+)?$/.test(v)) return v + 'px'; return v; };
       // Numeric pixel value for HTML width/height attributes (CLS prevention)
       const dimPx = (v) => { if (!v) return ''; const m = v.match(/^(\d+(?:\.\d+)?)(px)?$/); return m ? Math.round(parseFloat(m[1])) : ''; };
+
+      const rotate = img.rotate || null;
+      const swap = rotate === 90 || rotate === 270;
+      const renderW = swap ? (img.height || undefined) : (img.width || undefined);
+      const renderH = swap ? (img.width || undefined) : (img.height || undefined);
+
       let style = '';
       if (img.width) style += `width:${dimUnit(img.width)};`;
       if (img.height) style += `height:${dimUnit(img.height)};`;
+      const rotateStyle = rotate ? `transform:rotate(${rotate}deg);transform-origin:center;` : '';
+
       // Use full image directly; progressive loading handles dimension swap
       let imgAttrs = 'class="progressive-img" src="' + src + '"';
       const wPx = dimPx(img.width), hPx = dimPx(img.height);
-      if (wPx) imgAttrs += ' width="' + wPx + '"';
-      if (hPx) imgAttrs += ' height="' + hPx + '"';
+      // Swap intrinsic dimensions for 90/270 degree rotations so the browser
+      // reserves layout space for the rotated visual box.
+      const attrW = swap ? hPx : wPx;
+      const attrH = swap ? wPx : hPx;
+      if (attrW) imgAttrs += ' width="' + attrW + '"';
+      if (attrH) imgAttrs += ' height="' + attrH + '"';
 
       let replacement;
       const align = img.align || 'center';
       if (align === 'inline') {
-        const imgStyle = style ? ' style="' + style + 'vertical-align:middle;"' : ' style="vertical-align:middle;"';
-        replacement = '<img alt="' + altText + '" ' + imgAttrs + imgStyle + ' loading="lazy" decoding="async">';
+        // TODO: support rotation for inline images.
+        let imgStyle = '';
+        if (img.width) imgStyle += 'width:' + dimUnit(img.width) + ';';
+        if (img.height) imgStyle += 'height:' + dimUnit(img.height) + ';';
+        imgStyle += 'vertical-align:middle;';
+        replacement = '<img alt="' + altText + '" ' + imgAttrs + ' style="' + imgStyle + '" loading="lazy" decoding="async">';
       } else if (align === 'left' || align === 'right') {
         let wrapperStyle = 'float:' + align + ';text-align:center;';
         if (align === 'left') wrapperStyle += 'margin:0 16px 8px 0;';
         else wrapperStyle += 'margin:0 0 8px 16px;';
-        if (img.width) wrapperStyle += 'width:' + dimUnit(img.width) + ';';
-        wrapperStyle += 'max-width:100%;';
 
-        let imgOnlyStyle = '';
-        if (img.height) imgOnlyStyle += 'height:' + dimUnit(img.height) + ';';
-        const imgStyle = imgOnlyStyle ? ' style="' + imgOnlyStyle + 'max-width:100%;"' : ' style="max-width:100%;"';
+        let imgStyle = '';
+        if (rotate) {
+          if (renderW) wrapperStyle += 'width:' + dimUnit(renderW) + ';';
+          if (renderH) wrapperStyle += 'height:' + dimUnit(renderH) + ';';
+          if (img.width) imgStyle += 'width:' + dimUnit(img.width) + ';';
+          if (img.height) imgStyle += 'height:' + dimUnit(img.height) + ';';
+          imgStyle += rotateStyle;
+        } else {
+          if (img.width) wrapperStyle += 'width:' + dimUnit(img.width) + ';';
+          wrapperStyle += 'max-width:100%;';
+          if (img.height) imgStyle += 'height:' + dimUnit(img.height) + ';';
+          imgStyle += 'max-width:100%;';
+        }
 
         replacement = '<div style="' + wrapperStyle + '">'
-          + '<img alt="' + altText + '" ' + imgAttrs + imgStyle + ' loading="lazy" decoding="async">'
+          + '<img alt="' + altText + '" ' + imgAttrs + ' style="' + imgStyle + '" loading="lazy" decoding="async">'
           + '<div style="font-size:13px;color:var(--text3);margin-top:6px;word-break:break-word;">' + altText + '</div>'
           + '</div>';
       } else {
-        const imgStyle = style ? ' style="' + style + '"' : '';
-        const wrapperStyle = 'text-align:center;margin:16px 0;';
+        let wrapperStyle = 'text-align:center;margin:16px 0;';
+        let imgStyle = '';
+        if (rotate) {
+          if (renderW) wrapperStyle += 'width:' + dimUnit(renderW) + ';';
+          if (renderH) wrapperStyle += 'height:' + dimUnit(renderH) + ';';
+          if (img.width) imgStyle += 'width:' + dimUnit(img.width) + ';';
+          if (img.height) imgStyle += 'height:' + dimUnit(img.height) + ';';
+          imgStyle += rotateStyle;
+        } else {
+          if (img.width) imgStyle += 'width:' + dimUnit(img.width) + ';';
+          if (img.height) imgStyle += 'height:' + dimUnit(img.height) + ';';
+        }
         replacement = '<div style="' + wrapperStyle + '">'
-          + '<img alt="' + altText + '" ' + imgAttrs + imgStyle + ' loading="lazy" decoding="async">'
+          + '<img alt="' + altText + '" ' + imgAttrs + ' style="' + imgStyle + '" loading="lazy" decoding="async">'
           + '<div style="font-size:13px;color:var(--text3);margin-top:6px;">' + altText + '</div>'
           + '</div>';
       }

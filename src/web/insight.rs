@@ -111,7 +111,7 @@ pub(crate) async fn insight_analyze(
         let is_checked = paper.checked_at.is_some();
         (
             paper.title.clone(),
-            paper.r#abstract.clone(),
+            paper.abstract_zh.clone(),
             has_existing,
             is_checked,
         )
@@ -1594,7 +1594,9 @@ pub(crate) async fn format_insight(
     }
 
     let paper_id = format!("{}/{}", paper.source_type, paper.id);
-    let (new_md, _results) = crate::mdfmt::transform(&paper_id, markdown, false);
+    let zip_path = std::path::PathBuf::from(format!("figures/{}/mineru.zip", paper_id));
+    let page_width_px = crate::mdfmt::page_width_from_layout(&zip_path, 600);
+    let (new_md, _results) = crate::mdfmt::transform(&paper_id, markdown, false, page_width_px);
 
     let changed = new_md != *markdown;
     if !changed {
@@ -1609,10 +1611,7 @@ pub(crate) async fn format_insight(
         .insight_processed_at
         .as_ref()
         .map(|dt| dt.to_rfc3339());
-    let insight_reviewed_at_str = paper
-        .insight_reviewed_at
-        .as_ref()
-        .map(|dt| dt.to_rfc3339());
+    let insight_reviewed_at_str = paper.insight_reviewed_at.as_ref().map(|dt| dt.to_rfc3339());
     if let Err(e) = state
         .db
         .backup_insight(
@@ -1624,7 +1623,10 @@ pub(crate) async fn format_insight(
         )
         .await
     {
-        warn!("[format_insight] Failed to backup insight for {}: {}", id, e);
+        warn!(
+            "[format_insight] Failed to backup insight for {}: {}",
+            id, e
+        );
     }
 
     let updates = DbPaperUpdate {
@@ -1637,13 +1639,8 @@ pub(crate) async fn format_insight(
     }
 
     // Refresh HTML cache with newly formatted insight content
-    super::insight_html::refresh_insight_html_cache(
-        &state.db,
-        &paper.source_type,
-        &id,
-        &new_md,
-    )
-    .await;
+    super::insight_html::refresh_insight_html_cache(&state.db, &paper.source_type, &id, &new_md)
+        .await;
 
     Ok(Json(serde_json::json!({
         "changed": true,

@@ -5,12 +5,18 @@ fn rb(cap: Option<&str>, bbox: [f32; 4]) -> RawBlock {
 }
 
 fn rb_typed(cap: Option<&str>, bbox: [f32; 4], block_type: &str) -> RawBlock {
+    let desc = cap.map(|s| s.to_string()).unwrap_or_else(|| {
+        format!(
+            "{} on page {}, bbox[{}, {}, {}, {}]",
+            block_type, 1, bbox[0], bbox[1], bbox[2], bbox[3]
+        )
+    });
     RawBlock {
         bbox,
         body_bbox: bbox,
         block_type: block_type.to_string(),
         img_path: "test.jpg".to_string(),
-        desc: cap.unwrap_or("image on page 1").to_string(),
+        desc,
         page_idx: 0,
         caption_number: cap.map(|s| s.to_string()),
     }
@@ -778,9 +784,10 @@ fn test_rebind_orphan_caption_rejects_far_away_body_text() {
         [67.0, 154.0, 218.0, 240.0],
         "bbox must not expand to absorb the distant body paragraph"
     );
-    assert_eq!(
-        candidates[0].desc, "image on page 25",
-        "desc must remain unchanged"
+    assert!(
+        candidates[0].desc.starts_with("image on page 25"),
+        "desc must remain an image placeholder, got: {}",
+        candidates[0].desc
     );
 }
 
@@ -1859,10 +1866,11 @@ fn test_rebind_orphan_caption_above_table() {
 }
 
 #[test]
-fn test_rebind_orphan_caption_above_image_rejected() {
-    // Figure/image candidates keep the strict caption-below rule.  A caption
-    // sitting above an image candidate must NOT be rebound, since figure
-    // captions are conventionally placed below the body.
+fn test_rebind_orphan_caption_above_image_accepted_when_only_option() {
+    // A figure caption is conventionally below its body, but some papers place
+    // it above (e.g. 2306.17844 Figure 20, caption at the page top with the
+    // body below).  When the only candidate sits below the caption, the orphan
+    // must still rebind — there is no caption-below-figure alternative.
     let mut candidates = vec![RawBlock {
         bbox: [296.0, 575.0, 504.0, 723.0],
         body_bbox: [296.0, 575.0, 504.0, 723.0],
@@ -1881,17 +1889,61 @@ fn test_rebind_orphan_caption_above_image_rejected() {
     rebind_orphan_captions(&mut candidates, &orphans, &[]);
 
     assert_eq!(
-        candidates[0].caption_number, None,
-        "image candidate must not accept a caption sitting above"
-    );
-    assert_eq!(
-        candidates[0].desc, "image on page 6",
-        "desc must remain unchanged for rejected rebind"
+        candidates[0].caption_number,
+        Some("F:2".to_string()),
+        "above-caption must bind to the only candidate below it"
     );
     assert_eq!(
         candidates[0].bbox,
-        [296.0, 575.0, 504.0, 723.0],
-        "bbox must not expand when the rebind is rejected"
+        [296.0, 535.0, 505.0, 723.0],
+        "bbox must expand upward to include the caption strip"
+    );
+}
+
+#[test]
+fn test_rebind_orphan_caption_prefers_figure_above() {
+    // A caption sandwiched between two figures (e.g. 1312.5602 Figure 2, whose
+    // caption sits between two panel rows) must bind to the figure ABOVE it
+    // (caption-below-figure convention), even though the figure below is
+    // slightly closer to the caption.
+    let mut candidates = vec![
+        // Row above the caption — caption sits just below it (conventional).
+        RawBlock {
+            bbox: [104.0, 80.0, 504.0, 150.0],
+            body_bbox: [104.0, 80.0, 504.0, 150.0],
+            block_type: "chart".to_string(),
+            img_path: "row1.jpg".to_string(),
+            desc: "chart on page 7".to_string(),
+            page_idx: 6,
+            caption_number: None,
+        },
+        // Row below the caption — closer, but unconventional.
+        RawBlock {
+            bbox: [104.0, 243.0, 201.0, 308.0],
+            body_bbox: [104.0, 243.0, 201.0, 308.0],
+            block_type: "chart".to_string(),
+            img_path: "row2.jpg".to_string(),
+            desc: "chart on page 7".to_string(),
+            page_idx: 6,
+            caption_number: None,
+        },
+    ];
+    let orphans = vec![(
+        "Figure 2: The two plots on the left show average reward.".to_string(),
+        [104.0, 172.0, 504.0, 228.0],
+        6,
+    )];
+
+    rebind_orphan_captions(&mut candidates, &orphans, &[]);
+
+    assert_eq!(
+        candidates[0].caption_number,
+        Some("F:2".to_string()),
+        "caption must bind to the figure above it (conventional position)"
+    );
+    assert_eq!(
+        candidates[1].caption_number, None,
+        "the closer figure below the caption must not steal it"
     );
 }
 
@@ -3578,5 +3630,850 @@ async fn test_2005_11401_figure4_decomposed_repair() {
     assert!(
         body_right <= fig_right + 5.0,
         "body_right should not spill far outside figure bbox"
+    );
+}
+
+// -----------------------------------------------------------------------
+// swap_mismatched_captions
+// -----------------------------------------------------------------------
+
+/// Helper: create a RawBlock with a normalized caption_number derived from
+/// `desc` (as the real pipeline does).
+fn rb_mismatch(desc: &str, block_type: &str, bbox: [f32; 4], page_idx: i32) -> RawBlock {
+    let caption_number = extract_caption_number(desc);
+    RawBlock {
+        bbox,
+        body_bbox: bbox,
+        block_type: block_type.to_string(),
+        img_path: "test.jpg".to_string(),
+        desc: desc.to_string(),
+        page_idx,
+        caption_number,
+    }
+}
+
+/// Helper: create a bare placeholder block (no caption).
+fn rb_bare(block_type: &str, bbox: [f32; 4], page_idx: i32) -> RawBlock {
+    RawBlock {
+        bbox,
+        body_bbox: bbox,
+        block_type: block_type.to_string(),
+        img_path: "test.jpg".to_string(),
+        desc: format!("{} on page {}", block_type, page_idx + 1),
+        page_idx,
+        caption_number: None,
+    }
+}
+
+/// 1607.06450 scenario: table block carries a figure caption, no swap partner.
+/// Migration should move the caption to the bare image block on the same page.
+#[test]
+fn test_swap_migrate_caption_to_bare_block() {
+    // Table block with mismatched "Figure 3" caption (MinerU error).
+    let table_with_fig_cap = rb_mismatch(
+        "Figure 3: Performance of skip-thought vectors on downstream tasks.",
+        "table",
+        [104.0, 275.0, 506.0, 385.0],
+        7,
+    );
+    // Bare image block (no caption yet) — the real Figure 3 body.
+    let bare_image = rb_bare("image", [104.0, 44.0, 506.0, 263.0], 7);
+    // Unrelated block on a different page.
+    let other_page = rb_mismatch(
+        "Figure 1: Recall@K curves.",
+        "image",
+        [104.0, 50.0, 506.0, 185.0],
+        5,
+    );
+
+    let mut candidates = vec![table_with_fig_cap, bare_image, other_page];
+    swap_mismatched_captions(&mut candidates, &[]);
+
+    // Caption should have migrated from the table block to the image block.
+    assert!(
+        candidates[0].desc.starts_with("table on page 8"),
+        "table block should revert to placeholder, got: {}",
+        candidates[0].desc
+    );
+    assert_eq!(candidates[0].caption_number, None);
+    assert!(
+        candidates[1].desc.starts_with("Figure 3"),
+        "image block should receive the caption, got: {}",
+        candidates[1].desc
+    );
+    assert_eq!(
+        candidates[1].caption_number,
+        Some("F:3".to_string()),
+        "image block should get F:3"
+    );
+    // Unrelated block on page 6 should be untouched.
+    assert_eq!(candidates[2].caption_number, Some("F:1".to_string()));
+}
+
+/// When two mismatched blocks exist on the same page, Phase 1 (swap) fires
+/// and Phase 2 (migration) is skipped.
+#[test]
+fn test_swap_phase1_swap_two_mismatched() {
+    // Table block with "Figure 5" caption.
+    let table_with_fig = rb_mismatch(
+        "Figure 5: Ablation study.",
+        "table",
+        [50.0, 300.0, 250.0, 400.0],
+        0,
+    );
+    // Image block with "Table 2" caption.
+    let image_with_tbl = rb_mismatch(
+        "Table 2: Hyperparameters.",
+        "image",
+        [50.0, 50.0, 250.0, 200.0],
+        0,
+    );
+
+    let mut candidates = vec![table_with_fig, image_with_tbl];
+    swap_mismatched_captions(&mut candidates, &[]);
+
+    // After swap: table gets "Table 2", image gets "Figure 5".
+    assert_eq!(
+        candidates[0].desc, "Table 2: Hyperparameters.",
+        "table should receive the table caption"
+    );
+    assert_eq!(candidates[0].caption_number, Some("T:2".to_string()));
+    assert_eq!(
+        candidates[1].desc, "Figure 5: Ablation study.",
+        "image should receive the figure caption"
+    );
+    assert_eq!(candidates[1].caption_number, Some("F:5".to_string()));
+}
+
+/// When no bare block of the matching type exists, the mismatched caption
+/// stays in place (no crash, no panic).
+#[test]
+fn test_swap_migrate_no_bare_block_stays_put() {
+    let table_with_fig_cap = rb_mismatch(
+        "Figure 3: Performance.",
+        "table",
+        [104.0, 275.0, 506.0, 385.0],
+        7,
+    );
+    // No bare image on this page — only another captioned block.
+    let captioned_image = rb_mismatch("Figure 2: Curves.", "image", [104.0, 44.0, 506.0, 263.0], 7);
+
+    let mut candidates = vec![table_with_fig_cap, captioned_image];
+    swap_mismatched_captions(&mut candidates, &[]);
+
+    // Both blocks should remain unchanged.
+    assert_eq!(
+        candidates[0].caption_number,
+        Some("F:3".to_string()),
+        "mismatched caption stays when no bare block exists"
+    );
+    assert_eq!(candidates[1].caption_number, Some("F:2".to_string()));
+}
+
+/// Bare block of the WRONG type should not receive the caption.
+#[test]
+fn test_swap_migrate_wrong_type_bare_block_skipped() {
+    let table_with_fig_cap = rb_mismatch(
+        "Figure 3: Performance.",
+        "table",
+        [104.0, 275.0, 506.0, 385.0],
+        7,
+    );
+    // Bare TABLE block — wrong type for a figure caption.
+    let bare_table = rb_bare("table", [104.0, 44.0, 506.0, 263.0], 7);
+
+    let mut candidates = vec![table_with_fig_cap, bare_table];
+    swap_mismatched_captions(&mut candidates, &[]);
+
+    // Neither block should change.
+    assert_eq!(candidates[0].caption_number, Some("F:3".to_string()));
+    assert_eq!(candidates[1].caption_number, None);
+}
+
+/// Split-figure captions should be skipped during migration.
+#[test]
+fn test_swap_migrate_split_figure_skipped() {
+    let table_with_fig_cap = rb_mismatch(
+        "Figure 7: Sub-panels.",
+        "table",
+        [104.0, 275.0, 506.0, 385.0],
+        7,
+    );
+    let bare_image = rb_bare("image", [104.0, 44.0, 506.0, 263.0], 7);
+
+    let mut candidates = vec![table_with_fig_cap, bare_image];
+    swap_mismatched_captions(&mut candidates, &["F:7".to_string()]);
+
+    // Migration should be blocked — caption stays on the table block.
+    assert_eq!(candidates[0].caption_number, Some("F:7".to_string()));
+    assert_eq!(candidates[1].caption_number, None);
+}
+
+// ---------------------------------------------------------------------------
+// 2303.00848 pages 27-28 — standalone images with no caption must NOT merge
+// ---------------------------------------------------------------------------
+// Each page has a single small image with no Figure/Table caption.
+// Previously, two uncaptioned generic placeholders ("image on page N")
+// on the same page could merge when aligned and within the relaxed
+// v_thresh (22% page height), producing a single composite crop that
+// covers both images.  They should remain separate because there is
+// no evidence they belong to the same composite figure.
+// ---------------------------------------------------------------------------
+
+/// Two aligned generic placeholders on the same page must NOT merge.
+#[test]
+fn test_should_merge_both_no_cap_aligned_not_merged() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two independent images aligned side by side, no captions, with a 200pt
+    // horizontal gap — beyond the relaxed horizontal threshold (25% page
+    // width = 153pt) for both_no_cap.
+    let a = rb(None, [72.0, 100.0, 200.0, 250.0]);
+    let b = rb(None, [400.0, 100.0, 580.0, 250.0]);
+    // Vertical threshold is strict (3% page height ≈ 24pt); horizontal is
+    // relaxed so page-15-style side-by-side sub-panels merge.
+    assert!(
+        !should_merge(&a, &b, page_w, page_h, &[]),
+        "two uncaptioned independent images must not merge (no evidence of composite)"
+    );
+}
+
+/// 2303.00848 page 15 — side-by-side sub-panels without captions should
+/// still merge because they share the same row (relaxed horizontal threshold).
+#[test]
+fn test_should_merge_both_no_cap_horizontal_subpanels_merge() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two sub-panels on the same row, 50pt horizontal gap — well within the
+    // relaxed 25% page-width threshold (153pt) for both_no_cap.
+    let a = rb(None, [72.0, 100.0, 250.0, 250.0]);
+    let b = rb(None, [300.0, 100.0, 540.0, 250.0]);
+    assert!(
+        should_merge(&a, &b, page_w, page_h, &[]),
+        "side-by-side uncaptioned sub-panels on the same row must merge"
+    );
+}
+
+/// Two uncaptioned images vertically close (small gap) should merge
+/// only if the gap is within the tight threshold (3% page height).
+#[test]
+fn test_should_merge_both_no_cap_small_gap_merged() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two images vertically adjacent with a 10pt gap — within the 3%
+    // page-height threshold (~24 pt) for both_no_cap.
+    let a = rb(None, [72.0, 100.0, 540.0, 250.0]);
+    let b = rb(None, [72.0, 260.0, 540.0, 400.0]);
+    assert!(
+        should_merge(&a, &b, page_w, page_h, &[]),
+        "close vertical gap within tight threshold should still merge"
+    );
+}
+
+/// Two uncaptioned images with a large vertical gap must NOT merge.
+#[test]
+fn test_should_merge_both_no_cap_large_gap_not_merged() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two images far apart vertically — 200pt gap, well beyond the 3%
+    // page-height threshold (~24 pt) for both_no_cap.
+    let a = rb(None, [72.0, 100.0, 540.0, 200.0]);
+    let b = rb(None, [72.0, 400.0, 540.0, 550.0]);
+    assert!(
+        !should_merge(&a, &b, page_w, page_h, &[]),
+        "large vertical gap between uncaptioned blocks must not merge"
+    );
+}
+
+/// 2304.10557 Figure 7 — MinerU splits a figure into an `image` block (right
+/// half + caption) and an `interline_equation` block (left half diagram).
+/// The orphan equation block is fully inside the captioned figure, so it
+/// should be absorbed into Figure 7 instead of remaining as a separate block.
+#[test]
+fn test_should_merge_interline_equation_inside_figure() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    let figure7 = RawBlock {
+        bbox: [53.0, 352.0, 387.0, 605.0],
+        body_bbox: [274.0, 352.0, 313.0, 544.0],
+        block_type: "image".to_string(),
+        img_path: "fig7_right.jpg".to_string(),
+        desc: "Figure 7: The transformer block.".to_string(),
+        page_idx: 5,
+        caption_number: Some("F:7".to_string()),
+    };
+    let orphan_eq = RawBlock {
+        bbox: [124.0, 352.0, 313.0, 544.0],
+        body_bbox: [124.0, 352.0, 313.0, 544.0],
+        block_type: "interline_equation".to_string(),
+        img_path: "fig7_left.jpg".to_string(),
+        desc: "interline_equation on page 6, bbox[124, 352, 313, 544]".to_string(),
+        page_idx: 5,
+        caption_number: None,
+    };
+    assert!(
+        should_merge(&figure7, &orphan_eq, page_w, page_h, &[]),
+        "interline_equation fully inside a captioned figure should merge"
+    );
+}
+
+/// A standalone interline_equation next to a figure must NOT be absorbed.
+#[test]
+fn test_should_merge_interline_equation_outside_figure_not_merged() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    let figure7 = RawBlock {
+        bbox: [53.0, 352.0, 387.0, 605.0],
+        body_bbox: [274.0, 352.0, 313.0, 544.0],
+        block_type: "image".to_string(),
+        img_path: "fig7.jpg".to_string(),
+        desc: "Figure 7: The transformer block.".to_string(),
+        page_idx: 5,
+        caption_number: Some("F:7".to_string()),
+    };
+    let standalone_eq = RawBlock {
+        bbox: [400.0, 352.0, 560.0, 544.0],
+        body_bbox: [400.0, 352.0, 560.0, 544.0],
+        block_type: "interline_equation".to_string(),
+        img_path: "eq.jpg".to_string(),
+        desc: "interline_equation on page 6".to_string(),
+        page_idx: 5,
+        caption_number: None,
+    };
+    assert!(
+        !should_merge(&figure7, &standalone_eq, page_w, page_h, &[]),
+        "interline_equation outside the figure bbox must not merge"
+    );
+}
+
+/// 2604.14142 Figure 12 — a composite figure whose (a) sub-panel was
+/// classified as `table` and (b) sub-panel as `image`.  They are vertically
+/// stacked with strong horizontal overlap, so `should_merge_geometry_only`
+/// must link them for caption propagation.
+#[test]
+fn test_should_merge_geometry_only_table_image_vertical_stack() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // (a) sub-panel classified as table, sitting above the (b) image.
+    let sub_a = RawBlock {
+        bbox: [157.0, 121.0, 455.0, 219.0],
+        body_bbox: [157.0, 121.0, 455.0, 219.0],
+        block_type: "table".to_string(),
+        img_path: "fig12a.jpg".to_string(),
+        desc: "(a) Conditional token log-probabilities: log P ( y | x ) .".to_string(),
+        page_idx: 20,
+        caption_number: None,
+    };
+    // (b) sub-panel + Figure 12 main caption.
+    let sub_b = RawBlock {
+        bbox: [156.0, 245.0, 455.0, 342.0],
+        body_bbox: [156.0, 245.0, 455.0, 342.0],
+        block_type: "image".to_string(),
+        img_path: "fig12b.jpg".to_string(),
+        desc: "(b) Marginal token log-probabilities: log P ( y ) Figure 12: Comparison."
+            .to_string(),
+        page_idx: 20,
+        caption_number: Some("F:12".to_string()),
+    };
+    assert!(
+        should_merge_geometry_only(&sub_a, &sub_b, page_w, page_h),
+        "vertically-stacked table/image sub-panels of the same figure must be linked"
+    );
+}
+
+/// 2604.14142 Figure 12 — end-to-end: caption propagation assigns F:12 to
+/// the table sub-panel, then merge combines both sub-panels.
+#[test]
+fn test_propagate_caption_merges_table_image_vertical_stack() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    let mut sub_a = RawBlock {
+        bbox: [157.0, 121.0, 455.0, 219.0],
+        body_bbox: [157.0, 121.0, 455.0, 219.0],
+        block_type: "table".to_string(),
+        img_path: "fig12a.jpg".to_string(),
+        desc: "(a) Conditional token log-probabilities: log P ( y | x ) .".to_string(),
+        page_idx: 20,
+        caption_number: None,
+    };
+    let mut sub_b = RawBlock {
+        bbox: [156.0, 245.0, 455.0, 342.0],
+        body_bbox: [156.0, 245.0, 455.0, 342.0],
+        block_type: "image".to_string(),
+        img_path: "fig12b.jpg".to_string(),
+        desc: "(b) Marginal token log-probabilities: log P ( y ) Figure 12: Comparison."
+            .to_string(),
+        page_idx: 20,
+        caption_number: Some("F:12".to_string()),
+    };
+
+    let n = propagate_captions(
+        &mut [sub_a.clone(), sub_b.clone()],
+        page_w,
+        page_h,
+        None,
+        None,
+    );
+    assert_eq!(
+        n, 1,
+        "F:12 should propagate from image sub-panel to table sub-panel"
+    );
+
+    // After propagation, manually update the clone for the should_merge check.
+    sub_a.caption_number = Some("F:12".to_string());
+    assert!(
+        should_merge(&sub_a, &sub_b, page_w, page_h, &[]),
+        "sub-panels sharing F:12 should merge"
+    );
+}
+
+/// 2605.08078 page 1 — tiny logos/icons (e.g. 17x20pt) must be filtered
+/// even when the page has a unique figure caption that would otherwise
+/// protect generic placeholders as composite sub-panels.
+#[test]
+fn test_post_process_filters_tiny_logo_despite_unique_caption() {
+    let blocks = vec![
+        // A real figure with a caption.
+        RawBlock {
+            bbox: [72.0, 300.0, 540.0, 600.0],
+            body_bbox: [72.0, 300.0, 540.0, 550.0],
+            block_type: "image".to_string(),
+            img_path: "fig1.jpg".to_string(),
+            desc: "Figure 1: Real figure.".to_string(),
+            page_idx: 0,
+            caption_number: Some("F:1".to_string()),
+        },
+        // A tiny logo in the header (17x20pt).
+        RawBlock {
+            bbox: [85.0, 79.0, 102.0, 99.0],
+            body_bbox: [85.0, 79.0, 102.0, 99.0],
+            block_type: "image".to_string(),
+            img_path: "logo.jpg".to_string(),
+            desc: "image on page 1, bbox[85, 79, 102, 99]".to_string(),
+            page_idx: 0,
+            caption_number: None,
+        },
+    ];
+    let result = post_process_blocks(blocks, &[], &Default::default(), &Default::default(), None);
+    assert_eq!(
+        result.len(),
+        1,
+        "tiny logo must be filtered even on a page with a unique figure caption, got {} blocks",
+        result.len()
+    );
+    assert_eq!(
+        result[0].caption_number,
+        Some("F:1".to_string()),
+        "only the real figure should survive"
+    );
+}
+
+/// Full end-to-end test: two standalone images on the same page with no
+/// captions must produce two separate output blocks, not one composite.
+#[test]
+fn test_post_process_two_uncaptioned_images_stay_separate() {
+    let blocks = vec![
+        rb(None, [72.0, 100.0, 200.0, 250.0]),
+        rb(None, [400.0, 100.0, 580.0, 250.0]),
+    ];
+    let result = post_process_blocks(blocks, &[], &Default::default(), &Default::default(), None);
+    assert_eq!(
+        result.len(),
+        2,
+        "two uncaptioned standalone images must remain separate, got {} blocks",
+        result.len()
+    );
+}
+
+/// 2303.00848 page 15 — end-to-end: side-by-side sub-panels without captions
+/// should merge into one composite block.
+#[test]
+fn test_post_process_horizontal_subpanels_merge() {
+    let blocks = vec![
+        rb(None, [72.0, 100.0, 250.0, 250.0]),
+        rb(None, [300.0, 100.0, 540.0, 250.0]),
+    ];
+    let result = post_process_blocks(blocks, &[], &Default::default(), &Default::default(), None);
+    assert_eq!(
+        result.len(),
+        1,
+        "side-by-side uncaptioned sub-panels must merge into one composite, got {} blocks",
+        result.len()
+    );
+    assert_eq!(result[0].bbox, [72.0, 100.0, 540.0, 250.0]);
+}
+
+/// When one block has a caption and the other is a generic placeholder,
+/// the relaxed threshold should still allow them to merge (sub-panel case).
+#[test]
+fn test_should_merge_captioned_with_generic_placeholder_allowed() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Sub-panel without caption (generic placeholder), near a captioned figure.
+    let mut a = rb(Some("F:5"), [72.0, 100.0, 540.0, 250.0]);
+    a.desc = "Figure 5: Some results.".to_string();
+    let b = rb(None, [72.0, 260.0, 540.0, 380.0]);
+    // The generic placeholder gets the relaxed threshold (22% page height)
+    // because one block has a caption and the other is a sub-panel candidate.
+    assert!(
+        should_merge(&a, &b, page_w, page_h, &[]),
+        "generic placeholder near a captioned block should merge (sub-panel case)"
+    );
+}
+
+/// When both blocks share the same confirmed caption, the relaxed
+/// threshold should allow them to merge (composite figure case).
+#[test]
+fn test_should_merge_same_confirmed_caption_large_gap_merged() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two blocks with same confirmed caption number, large vertical gap
+    // (100pt) that is within 22% page height (174pt).
+    let mut a = rb(Some("F:6"), [72.0, 100.0, 540.0, 200.0]);
+    a.desc = "Figure 6: Top row.".to_string();
+    let mut b = rb(Some("F:6"), [72.0, 300.0, 540.0, 450.0]);
+    b.desc = "Figure 6: Bottom row.".to_string();
+    assert!(
+        should_merge(&a, &b, page_w, page_h, &[]),
+        "same confirmed caption should allow large-gap merge"
+    );
+}
+
+/// Desc format: uncaptioned images should include bbox in their description
+/// so they are uniquely identifiable (not just "image on page N").
+#[test]
+fn test_uncaptioned_desc_contains_bbox() {
+    let page_w = 612.0;
+    let page_h = 792.0;
+    // Two uncaptioned images on the same page with different bboxes.
+    let a = RawBlock {
+        bbox: [72.0, 100.0, 250.0, 250.0],
+        body_bbox: [72.0, 100.0, 250.0, 250.0],
+        block_type: "image".to_string(),
+        img_path: "a.jpg".to_string(),
+        desc: "image on page 27, bbox[72, 100, 250, 250]".to_string(),
+        page_idx: 26,
+        caption_number: None,
+    };
+    let b = RawBlock {
+        bbox: [410.0, 100.0, 590.0, 250.0],
+        body_bbox: [410.0, 100.0, 590.0, 250.0],
+        block_type: "image".to_string(),
+        img_path: "b.jpg".to_string(),
+        page_idx: 26,
+        caption_number: None,
+        desc: "image on page 27, bbox[410, 100, 590, 250]".to_string(),
+    };
+    // Descriptions must be different even though both are "image on page...".
+    assert_ne!(a.desc, b.desc, "bbox-differentiated descs must differ");
+    // Both must still be recognized as generic placeholders.
+    assert!(a.desc.starts_with("image on page"));
+    assert!(b.desc.starts_with("image on page"));
+    // They should NOT merge because they are both uncaptioned and far apart.
+    assert!(
+        !should_merge(&a, &b, page_w, page_h, &[]),
+        "two uncaptioned standalone images on the same page must not merge"
+    );
+}
+
+/// 2406.16860 page 18 — MinerU mis-labels a 2x2 image grid as a table
+/// and nests both the real Table 8 caption (above the grid) and the
+/// Figure 12 caption (below the grid) inside the same `table` para_block.
+/// The table-to-image reclassification must split them into two blocks so
+/// Table 8 does not swallow Figure 12.
+#[test]
+fn test_reclassify_table_with_figure_caption_below_body() {
+    let table_block = parse_block(
+        r#"{
+            "type": "table",
+            "bbox": [73, 179, 517, 464],
+            "blocks": [
+                {
+                    "type": "table_caption",
+                    "bbox": [68, 132, 524, 170],
+                    "lines": [
+                        {
+                            "bbox": [68, 132, 524, 170],
+                            "spans": [
+                                {
+                                    "type": "text",
+                                    "content": "Table 8  Performance improves with better instruction tuning data curation."
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "table_body",
+                    "bbox": [73, 179, 517, 464],
+                    "lines": [
+                        {
+                            "bbox": [73, 179, 517, 464],
+                            "spans": [
+                                {
+                                    "type": "image",
+                                    "image_path": "fig12_grid.jpg"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "table_caption",
+                    "bbox": [68, 473, 525, 523],
+                    "lines": [
+                        {
+                            "bbox": [68, 473, 525, 523],
+                            "spans": [
+                                {
+                                    "type": "text",
+                                    "content": "Figure 12  Incorporating System Prompt in Instruction Tuning Data."
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#,
+    );
+
+    assert!(
+        table_block.should_reclassify_table_as_image(),
+        "table block with Figure 12 caption below body should be reclassified as image"
+    );
+
+    // A genuine table with its own caption above body should NOT be reclassified.
+    let genuine_table = parse_block(
+        r#"{
+            "type": "table",
+            "bbox": [73, 179, 517, 464],
+            "blocks": [
+                {
+                    "type": "table_caption",
+                    "bbox": [68, 132, 524, 170],
+                    "lines": [
+                        {
+                            "bbox": [68, 132, 524, 170],
+                            "spans": [
+                                {
+                                    "type": "text",
+                                    "content": "Table 8  Performance improves with better instruction tuning data curation."
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "table_body",
+                    "bbox": [73, 179, 517, 464],
+                    "lines": [
+                        {
+                            "bbox": [73, 179, 517, 464],
+                            "spans": [
+                                {
+                                    "type": "image",
+                                    "image_path": "table8.jpg"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#,
+    );
+
+    assert!(
+        !genuine_table.should_reclassify_table_as_image(),
+        "genuine table with only table caption should not be reclassified"
+    );
+}
+
+/// 1607.06450 actual scenario: merged composite image block has sub-panel
+/// desc "(a) SICK(r); (b) SICK(MSE); ..." but caption_number=None.
+/// Migration should still find it as a valid target.
+#[test]
+fn test_swap_migrate_to_merged_composite_block() {
+    // Table block with mismatched "Figure 3" caption (MinerU error).
+    let table_with_fig_cap = rb_mismatch(
+        "Figure 3: Performance of skip-thought vectors on downstream tasks.",
+        "table",
+        [108.0, 318.0, 501.0, 385.0],
+        7,
+    );
+    // Merged composite image block with sub-panel labels but no caption.
+    // This is what post_process_blocks produces after merging 6 sub-panels.
+    let merged_image = RawBlock {
+        bbox: [108.0, 44.0, 494.0, 263.0],
+        body_bbox: [108.0, 44.0, 494.0, 263.0],
+        block_type: "image".to_string(),
+        img_path: "test.jpg".to_string(),
+        desc: "(a) SICK(r); (b) SICK(MSE); (c) MR; (d) CR; (e) SUBJ; (f) MPQA".to_string(),
+        page_idx: 7,
+        caption_number: None,
+    };
+
+    let mut candidates = vec![table_with_fig_cap, merged_image];
+    swap_mismatched_captions(&mut candidates, &[]);
+
+    // Caption should migrate to the merged composite block.
+    assert!(
+        candidates[0].desc.starts_with("table on page 8"),
+        "table block should revert to placeholder, got: {}",
+        candidates[0].desc
+    );
+    assert_eq!(candidates[0].caption_number, None);
+    assert!(
+        candidates[1].desc.starts_with("Figure 3"),
+        "composite image block should receive the caption, got: {}",
+        candidates[1].desc
+    );
+    assert_eq!(candidates[1].caption_number, Some("F:3".to_string()));
+}
+
+// -----------------------------------------------------------------------
+// synthesize_equation_figure_for_orphan
+// -----------------------------------------------------------------------
+
+/// 2304.10557 Figure 4: MinerU typed the figure body as interline_equation
+/// and the caption as a regular text block, so the orphan caption had no
+/// image/chart candidate to bind to.  The fallback should synthesize an
+/// image candidate from the equation block and fold the caption into its bbox.
+#[test]
+fn test_synthesize_equation_figure_for_orphan() {
+    let page_json = r#"{
+        "page_idx": 4,
+        "para_blocks": [
+            {
+                "type": "interline_equation",
+                "bbox": [102, 102, 342, 196],
+                "blocks": [
+                    {
+                        "type": "inline_equation",
+                        "bbox": [102, 102, 342, 196],
+                        "lines": [
+                            {
+                                "bbox": [102, 102, 342, 196],
+                                "spans": [
+                                    {
+                                        "type": "image",
+                                        "image_path": "eq_figure_4.jpg"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let page: LayoutPage = serde_json::from_str(page_json).expect("valid LayoutPage JSON");
+    let cap_text =
+        "Figure 4: Multi-head self-attention applies H self-attention operations in parallel";
+    let cap_bbox = [394.0, 148.0, 575.0, 159.0];
+
+    let synth = synthesize_equation_figure_for_orphan(&page, cap_text, cap_bbox, &[])
+        .expect("should synthesize a figure candidate");
+
+    assert_eq!(synth.block_type, "image");
+    assert_eq!(synth.caption_number, Some("F:4".to_string()));
+    assert_eq!(synth.page_idx, 4);
+    assert_eq!(synth.img_path, "eq_figure_4.jpg");
+    assert_eq!(synth.desc, cap_text);
+    // body_bbox is the equation body only
+    assert_eq!(synth.body_bbox, [102.0, 102.0, 342.0, 196.0]);
+    // full bbox includes the caption strip on the right
+    assert_eq!(synth.bbox, [102.0, 102.0, 575.0, 196.0]);
+}
+
+/// If an image/chart candidate already exists on the page, the fallback must
+/// not run so the normal rebind path can handle the orphan.
+#[test]
+fn test_synthesize_equation_figure_skips_when_image_candidate_exists() {
+    let page_json = r#"{
+        "page_idx": 4,
+        "para_blocks": [
+            {
+                "type": "interline_equation",
+                "bbox": [102, 102, 342, 196],
+                "blocks": [
+                    {
+                        "type": "inline_equation",
+                        "bbox": [102, 102, 342, 196],
+                        "lines": [
+                            {
+                                "bbox": [102, 102, 342, 196],
+                                "spans": [
+                                    {
+                                        "type": "image",
+                                        "image_path": "eq_figure_4.jpg"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let page: LayoutPage = serde_json::from_str(page_json).expect("valid LayoutPage JSON");
+    let existing = RawBlock {
+        bbox: [100.0, 100.0, 350.0, 200.0],
+        body_bbox: [100.0, 100.0, 350.0, 200.0],
+        block_type: "image".to_string(),
+        img_path: "existing.jpg".to_string(),
+        desc: "image on page 5, bbox[100, 100, 350, 200]".to_string(),
+        page_idx: 4,
+        caption_number: None,
+    };
+    let cap_text = "Figure 4: Multi-head self-attention ...";
+    let cap_bbox = [394.0, 148.0, 575.0, 159.0];
+
+    assert!(
+        synthesize_equation_figure_for_orphan(&page, cap_text, cap_bbox, &[existing]).is_none(),
+        "should not synthesize when a real image candidate exists"
+    );
+}
+
+/// A non-figure orphan (table caption) should not be synthesized from an
+/// interline_equation block.
+#[test]
+fn test_synthesize_equation_figure_ignores_table_caption() {
+    let page_json = r#"{
+        "page_idx": 4,
+        "para_blocks": [
+            {
+                "type": "interline_equation",
+                "bbox": [102, 102, 342, 196],
+                "blocks": [
+                    {
+                        "type": "inline_equation",
+                        "bbox": [102, 102, 342, 196],
+                        "lines": [
+                            {
+                                "bbox": [102, 102, 342, 196],
+                                "spans": [
+                                    {
+                                        "type": "image",
+                                        "image_path": "eq.jpg"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let page: LayoutPage = serde_json::from_str(page_json).expect("valid LayoutPage JSON");
+
+    assert!(
+        synthesize_equation_figure_for_orphan(
+            &page,
+            "Table 4: Results",
+            [394.0, 148.0, 575.0, 159.0],
+            &[]
+        )
+        .is_none(),
+        "table orphan should not synthesize an equation figure"
     );
 }

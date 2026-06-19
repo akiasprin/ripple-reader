@@ -66,7 +66,7 @@ impl Db {
     pub async fn list_papers_by_date(&self, date_prefix: &str) -> Result<Vec<PaperByDate>> {
         let pattern = format!("{}%", date_prefix);
         let rows = sqlx::query(
-            "SELECT p.id, p.title, p.authors, p.abstract, p.score, pm.mark, p.source_type \
+            "SELECT p.id, p.title, p.authors, p.abstract_zh, p.score, pm.mark, p.source_type \
              FROM papers p \
              LEFT JOIN paper_marks pm ON p.id = pm.paper_id \
              WHERE p.published::date::text LIKE $1 \
@@ -88,7 +88,7 @@ impl Db {
                 id,
                 title: row.try_get("title")?,
                 authors: authors_json.0,
-                r#abstract: row.try_get("abstract")?,
+                abstract_zh: row.try_get("abstract_zh")?,
                 score: row.try_get("score")?,
                 mark: row.try_get("mark").ok(),
                 source_type: row.try_get("source_type").ok(),

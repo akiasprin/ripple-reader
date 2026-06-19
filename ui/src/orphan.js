@@ -34,7 +34,7 @@ export const orphan = {
             <span class="orphan-card-title" onclick="app.showInsightPage('${this.escape(o.id)}')">${this.escape(o.title)}</span>
           </div>
           ${tagsHtml ? `<div class="orphan-card-tags">${tagsHtml}</div>` : ''}
-          <div class="orphan-card-abstract">${this.escape(o.abstract || '')}</div>
+          <div class="orphan-card-abstract">${this.escape(o.abstract_zh || '')}</div>
         </div>
       `;
     }).join('');
@@ -101,7 +101,7 @@ export const orphan = {
                 <span class="orphan-card-title" onclick="app.showInsightPage('${this.escape(p.id)}')">${this.escape(p.title)}</span>
               </div>
               ${tagsHtml ? `<div class="orphan-card-tags">${tagsHtml}</div>` : ''}
-              <div class="orphan-card-abstract">${this.escape(p.abstract || '')}</div>
+              <div class="orphan-card-abstract">${this.escape(p.abstract_zh || '')}</div>
             </div>
           `;
         }).join('');

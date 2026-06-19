@@ -41,7 +41,6 @@ export const insight = {
   },
 
   async showInsightPage(id, source, skipPush) {
-    this.haptic('medium');
     // Reset pseudocode.js caption counter so algorithm numbering restarts on each paper
     if (typeof pseudocode !== 'undefined' && pseudocode.Renderer) {
       pseudocode.Renderer.captionCount = 0;
@@ -264,7 +263,6 @@ export const insight = {
   },
 
   hideInsightPage() {
-    this.haptic('light');
     this.insightPageId = null;
     this.insightPageData = null;
     this.insightPageEditing = false;
@@ -291,6 +289,9 @@ export const insight = {
     // The comments toggle is a fixed element outside insightPage, so hide it explicitly.
     const commentsToggle = document.getElementById('commentsToggleBtn');
     if (commentsToggle) commentsToggle.classList.remove('show');
+    // Hide mobile selection bar (添加批注 / 使用魔法) that may still be visible
+    // from a text selection on the insight page.
+    this.hideSelectionTooltip();
     document.getElementById('insightPage').classList.remove('open');
     document.getElementById('insightPage').innerHTML = '';
     document.getElementById('tagsPage').classList.remove('open');
@@ -546,11 +547,23 @@ export const insight = {
       if (panel) panel.classList.add('open');
       const toggle = document.getElementById('commentsToggleBtn');
       if (toggle) toggle.classList.remove('show');
+      // On mobile, re-hide floating bars that may have been re-shown by
+      // updateProgressPanel() polling between the innerHTML rebuild and now.
+      if (!this.isDesktopViewport()) {
+        const tocBar = document.getElementById('insightTocBar');
+        const tocPanel = document.getElementById('insightTOC');
+        const progressBar = document.getElementById('progressBar');
+        const progressPanel = document.getElementById('insightProgressPanel');
+        if (tocBar) tocBar.classList.remove('show');
+        if (tocPanel) tocPanel.classList.remove('show');
+        if (progressBar) progressBar.classList.remove('show');
+        if (progressPanel) progressPanel.classList.remove('show');
+      }
     }
     // InnerHTML rebuild destroyed the old DOM; force re-render so comments
     // and highlights are painted into the fresh DOM even if the data hasn't
     // changed (fingerprint would otherwise skip the update).
-    if (this.comments.length > 0) {
+    if (!this.insightPageEditing && this.comments.length > 0) {
       this._commentsFingerprint = '';
       this.renderComments();
       this._highlightsFingerprint = '';
@@ -608,7 +621,7 @@ export const insight = {
     return `
       <div class="insight-meta-info" id="insightMetaInfo" style="display:${isOpen ? '' : 'none'};">
         <div class="insight-meta-info-inner">
-          ${p.abstract ? `
+          ${p.abstract_zh ? `
           <div class="info-section">
             <div class="info-label">摘要</div>
             <div class="info-content dark" data-defer-markdown="1"></div>
@@ -846,8 +859,8 @@ export const insight = {
       const content = sec.querySelector('.info-content.dark');
       if (!content || !content.dataset.deferMarkdown) return;
       const text = label ? label.textContent.trim() : '';
-      if (text === '摘要' && p.abstract) {
-        content.innerHTML = this.renderMarkdown(this.escapeHtml(p.abstract), false, { deferKatex: true, deferPrettier: true });
+      if (text === '摘要' && p.abstract_zh) {
+        content.innerHTML = this.renderMarkdown(this.escapeHtml(p.abstract_zh), false, { deferKatex: true, deferPrettier: true });
         content.removeAttribute('data-defer-markdown');
       } else if (text === '总结' && p.summary) {
         content.innerHTML = this.renderMarkdown(this.escapeHtml(p.summary), false, { deferKatex: true, deferPrettier: true });

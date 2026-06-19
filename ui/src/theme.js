@@ -31,7 +31,6 @@ export const theme = {
   },
 
   toggleTheme() {
-    this.haptic('light');
     const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     const nextIsDark = !isDark;
     const apply = () => {

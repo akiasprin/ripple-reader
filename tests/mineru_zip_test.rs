@@ -1332,6 +1332,46 @@ async fn test_2404_11614_figure3_interline_equation_rebind() {
     );
 }
 
+/// 1502.04623 page 7: Figure 8 ("Generated MNIST images with two digits") is a
+/// grid of generated double-digit glyphs that MinerU OCR'd into a LaTeX array,
+/// typing the block `interline_equation`.  Its "Figure 8" caption was absorbed
+/// as an above-body `image_caption` sub-block of the adjacent Figure 9 (SVHN)
+/// image block, so the standalone-caption detection in `is_interline_figure`
+/// found nothing and the figure was dropped (the log jumped Figure 7 -> 9).
+/// The nested-caption detection path recovers it.
+#[tokio::test]
+async fn test_1502_04623_figure8_interline_equation_nested_caption() {
+    let paper_id = "1502.04623";
+    let src_zip = fixture_zip_for(paper_id).await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cache_dir = tmp.path().to_string_lossy().to_string();
+    let paper_dir = tmp.path().join(paper_id);
+    std::fs::create_dir_all(&paper_dir).unwrap();
+    std::fs::copy(&src_zip, paper_dir.join("mineru.zip")).unwrap();
+
+    let client = MinerUClient::new(
+        "http://unused".to_string(),
+        "unused".to_string(),
+        Some(cache_dir),
+        false,
+    );
+    let result = client.reprocess_from_zip(paper_id, &[], false, false).await;
+
+    let figures = match result {
+        Ok(f) => f,
+        Err(e) => panic!("1502.04623 validation should pass: {}", e),
+    };
+
+    let descs: Vec<&str> = figures.images.iter().map(|(d, _)| d.as_str()).collect();
+
+    assert!(
+        descs.iter().any(|d| d.contains("Figure 8")),
+        "Figure 8 should be recovered from the interline_equation block. Found: {:?}",
+        descs
+    );
+}
+
 /// 2407.08608 Figure 4: MinerU classified both Figure 3 and Figure 4 as
 /// "table" blocks.  The Figure 4 caption becomes an orphan but the only bare
 /// candidate on page 8 is also a table — type guard previously blocked the
@@ -2184,5 +2224,169 @@ async fn test_1608_05343_figure2_no_right_column_bleed() {
         "Figure 2 bbox right edge must stay in the left column (< 320), got {} (bbox {:?})",
         right,
         fig2.bbox,
+    );
+}
+
+/// Verify 2112.10752 Figure 5/6/7 are distinct after orphan-caption rebind.
+/// MinerU nested "Figure 5" inside the table block and "Figure 6" inside the
+/// Figure 7 block.  The hard type-mismatch skip was converted to a score
+/// penalty so Figure 5 can bind to its table body.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_2112_10752_figure5_6_7_distinct() {
+    let paper_id = "2112.10752";
+    let src_zip = fixture_zip_for(paper_id).await;
+
+    let figures = reprocess_fixture(paper_id, &src_zip).await;
+
+    // Figure 5 is the text-to-image sample grid (table type).
+    let fig5 = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .find(|((desc, _), bb)| desc.contains("Figure 5") && bb.page_idx == 5);
+    let ((desc5, _), bb5) = fig5.expect("Figure 5 must be present on page 6 (page_idx=5)");
+    assert!(
+        bb5.content_type == "table",
+        "Figure 5 must be table type, got {}",
+        bb5.content_type
+    );
+
+    // Figure 6 is the training-analysis chart (image type).
+    let fig6 = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .find(|((desc, _), bb)| desc.contains("Figure 6") && bb.page_idx == 5);
+    let ((desc6, _), bb6) = fig6.expect("Figure 6 must be present on page 6 (page_idx=5)");
+    assert!(
+        bb6.content_type == "image" || bb6.content_type == "chart",
+        "Figure 6 must be image/chart type, got {}",
+        bb6.content_type
+    );
+
+    // Figure 7 must also be present and distinct.
+    let fig7 = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .find(|((desc, _), bb)| desc.contains("Figure 7") && bb.page_idx == 5);
+    let ((desc7, _), bb7) = fig7.expect("Figure 7 must be present on page 6 (page_idx=5)");
+
+    // All three must have distinct bounding boxes (not overlapping entirely).
+    // Figure 5 bbox should include the caption strip below the table body.
+    assert!(
+        bb5.bbox[3] > 270.0,
+        "Figure 5 bbox must extend to include its caption (y>270), got {:?}",
+        bb5.bbox
+    );
+    // Figure 6 bbox should include its caption above the body.
+    assert!(
+        bb6.bbox[1] < 310.0,
+        "Figure 6 bbox top must include its caption above body (y<310), got {:?}",
+        bb6.bbox
+    );
+
+    eprintln!(
+        "2112.10752 page 6: Fig5 desc={:?} bbox={:?}, Fig6 desc={:?} bbox={:?}, Fig7 desc={:?} bbox={:?}",
+        desc5, bb5.bbox, desc6, bb6.bbox, desc7, bb7.bbox
+    );
+}
+
+/// Verify 2112.10752 Table 14 and Table 15 are distinct on page 25.
+/// MinerU nested Table 14's caption inside Table 15's para_block.
+/// The above+b below caption split fix keeps the below caption with the block
+/// and emits the above caption as orphan for spatial rebind.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_2112_10752_table14_15_distinct() {
+    let paper_id = "2112.10752";
+    let src_zip = fixture_zip_for(paper_id).await;
+
+    let figures = reprocess_fixture(paper_id, &src_zip).await;
+
+    // Table 14: unconditional LDMs hyperparams (CelebA).
+    let tbl14 = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .find(|((desc, _), bb)| desc.contains("Table 14") && bb.page_idx == 24);
+    let ((desc14, _), bb14) = tbl14.expect("Table 14 must be present on page 25 (page_idx=24)");
+    assert!(
+        bb14.content_type == "table",
+        "Table 14 must be table type, got {}",
+        bb14.content_type
+    );
+    // Table 14 body is at y=70-219; bbox must NOT extend into Table 15 body.
+    assert!(
+        bb14.bbox[3] < 275.0,
+        "Table 14 bbox must not include Table 15 body (y<275), got {:?}",
+        bb14.bbox
+    );
+
+    // Table 15: conditional LDMs hyperparams.
+    let tbl15 = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .find(|((desc, _), bb)| desc.contains("Table 15") && bb.page_idx == 24);
+    let ((desc15, _), bb15) = tbl15.expect("Table 15 must be present on page 25 (page_idx=24)");
+    assert!(
+        bb15.content_type == "table",
+        "Table 15 must be table type, got {}",
+        bb15.content_type
+    );
+    // Table 15 body starts at y=280; bbox top must not reach into Table 14.
+    assert!(
+        bb15.bbox[1] > 270.0,
+        "Table 15 bbox top must be below Table 14 caption (y>270), got {:?}",
+        bb15.bbox
+    );
+
+    eprintln!(
+        "2112.10752 page 25: Tbl14 desc={:?} bbox={:?}, Tbl15 desc={:?} bbox={:?}",
+        desc14, bb14.bbox, desc15, bb15.bbox
+    );
+}
+
+/// Verify 1608.05343 Table 2 left (table) and right (chart) are merged into
+/// a single entry on page 11.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_1608_05343_table2_merged() {
+    let paper_id = "1608.05343";
+    let src_zip = fixture_zip_for(paper_id).await;
+
+    let figures = reprocess_fixture(paper_id, &src_zip).await;
+
+    // Table 2 should be a single merged entry covering both the table and chart.
+    let tbl2_entries: Vec<_> = figures
+        .images
+        .iter()
+        .zip(&figures.image_bboxes)
+        .filter(|((desc, _), bb)| desc.contains("Table 2") && bb.page_idx == 10)
+        .collect();
+
+    assert_eq!(
+        tbl2_entries.len(),
+        1,
+        "Table 2 should be a single merged entry, found {}",
+        tbl2_entries.len()
+    );
+
+    let ((desc, _), bb) = tbl2_entries[0];
+    // The merged bbox should cover both the left table (y=65-192) and the
+    // right chart (y=196-358), with the caption at y=371-437.
+    assert!(
+        bb.bbox[3] >= 430.0,
+        "Table 2 bbox must extend to include its caption (y>=430), got {:?}",
+        bb.bbox
+    );
+    assert!(
+        bb.bbox[1] <= 70.0,
+        "Table 2 bbox top must start near the table top (y<=70), got {:?}",
+        bb.bbox
+    );
+
+    eprintln!(
+        "1608.05343 page 11: Table 2 desc={:?} bbox={:?}",
+        desc, bb.bbox
     );
 }

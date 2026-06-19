@@ -16,6 +16,7 @@ pub async fn process_paper_with_cache(
     paper: &Paper,
     pdf_semaphore: &Arc<Semaphore>,
     force_refresh: bool,
+    skip_author_stats: bool,
 ) -> Result<(Summary, String, bool)> {
     // Skip deleted papers
     if db.is_deleted(&paper.id).await.unwrap_or(false) {
@@ -41,7 +42,7 @@ pub async fn process_paper_with_cache(
                 tags,
                 raw: String::new(),
             };
-            return Ok((summary, cached.r#abstract, false));
+            return Ok((summary, cached.abstract_zh, false));
         }
     } else {
         info!(
@@ -162,15 +163,16 @@ pub async fn process_paper_with_cache(
 
     let db_paper = crate::db::DbPaper {
         id: paper.id.clone(),
-        title: crate::db::cleanup_text(&paper.title),
+        title: crate::db::normalize_text(&paper.title),
         authors: paper.authors.clone(),
         published: DateTime::parse_from_rfc3339(&paper.published)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(|_| Utc::now()),
         score: summary.score,
-        paper_type: crate::db::cleanup_text(&summary.paper_type),
-        summary: crate::db::cleanup_text(&summary.summary),
-        r#abstract: crate::db::cleanup_text(&abs),
+        paper_type: crate::db::normalize_text(&summary.paper_type),
+        summary: crate::db::normalize_text_convert_quotes(&summary.summary),
+        abstract_zh: crate::db::normalize_text_convert_quotes(&abs),
+        abstract_en: crate::db::normalize_text_convert_quotes(&paper.summary),
         processed_at: Utc::now(),
         insight: existing_insight,
         insight_processed_at: existing_insight_processed_at,
@@ -191,22 +193,24 @@ pub async fn process_paper_with_cache(
     }
 
     // Update author stats after successful processing
-    let mark = db.get_mark(&paper.id).await.ok().flatten();
-    let is_critical = mark.as_deref() == Some("critical");
-    for author in paper.authors.iter().take(20) {
-        let author = author.trim();
-        if author.len() < 2 {
-            warn!(
-                "[author_stats] Skipping short author name '{}' from paper {}",
-                author, paper.id
-            );
-            continue;
-        }
-        if let Err(e) = db
-            .upsert_author_stats(author, summary.score, is_critical)
-            .await
-        {
-            warn!("[author_stats] Failed to update {}: {}", author, e);
+    if !skip_author_stats {
+        let mark = db.get_mark(&paper.id).await.ok().flatten();
+        let is_critical = mark.as_deref() == Some("critical");
+        for author in paper.authors.iter().take(20) {
+            let author = author.trim();
+            if author.len() < 2 {
+                warn!(
+                    "[author_stats] Skipping short author name '{}' from paper {}",
+                    author, paper.id
+                );
+                continue;
+            }
+            if let Err(e) = db
+                .upsert_author_stats(author, summary.score, is_critical)
+                .await
+            {
+                warn!("[author_stats] Failed to update {}: {}", author, e);
+            }
         }
     }
 
@@ -307,7 +311,23 @@ pub async fn process_paper(
     };
 
     info!("[process_paper] Extracting sections for {}", paper.id);
-    let sections = crate::extractor::extract_sections(&text);
+    let _text_permit = processor
+        .text_sem
+        .acquire()
+        .await
+        .context("Failed to acquire text postprocess semaphore")?;
+    let sections = tokio::task::spawn_blocking({
+        let text = text.clone();
+        let id = paper.id.clone();
+        move || {
+            info!(
+                "[process_paper] Running extract_sections for {} in blocking thread",
+                id
+            );
+            crate::extractor::extract_sections(&text)
+        }
+    })
+    .await?;
     let combined_len = sections.intro.len() + sections.conclusion.len();
     info!("[process_paper] Section extraction complete for {} (intro={} chars, conclusion={} chars, header_len={}, combined={})",
         paper.id, sections.intro.len(), sections.conclusion.len(),
@@ -317,14 +337,20 @@ pub async fn process_paper(
         sections.header, sections.intro, sections.conclusion
     );
 
+    info!("[process_paper] Calling translator for {}", paper.id);
+    // Translate first so the Chinese abstract can feed into summarize.
+    let abs = processor.translate(&paper.summary).await?;
     info!(
-        "[process_paper] Calling processor and translator for {}",
-        paper.id
+        "[process_paper] Translation done for {} (abstract_len={})",
+        paper.id,
+        abs.len()
     );
-    let (summary, abs) = tokio::try_join!(
-        processor.summarize(&paper.title, &combined),
-        processor.translate(&paper.summary)
-    )?;
+
+    let summarize_input = format!(
+        "{}\n\nREFERENCE STYLE (translated abstract, align expression style with this):\n{}",
+        combined, abs
+    );
+    let summary = processor.summarize(&paper.title, &summarize_input).await?;
     info!(
         "[process_paper] Paper {} completed (score={:.1}/10.0, digest_len={}, abstract_len={})",
         paper.id,

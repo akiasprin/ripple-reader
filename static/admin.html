@@ -575,6 +575,11 @@ html, body {
               <input type="number" id="arxiv_page_size" min="1" max="2000">
 <div class="field-desc">每页请求数量，范围 1-2000</div>
             </div>
+            <div class="form-field full">
+              <label>缓存有效期</label>
+              <input type="number" id="arxiv_cache_ttl_hours" min="1" max="8760">
+<div class="field-desc">arXiv fetch 缓存有效时间（小时），范围 1-8760，默认 48</div>
+            </div>
           </div>
         </div>
 
@@ -836,6 +841,8 @@ html, body {
     html += '</div><button type="button" class="btn btn-secondary btn-sm" onclick="addInlineApiKey(this)" style="margin-top:4px;align-self:flex-start;">+ 添加 API Key</button></div>';
     html += '<div class="edit-field"><label>模型</label><input type="text" class="pf-model" value="' + escapeHtml(p.model) + '" placeholder="gpt-4o"></div>';
     html += '<div class="edit-field"><label>Max Tokens</label><input type="number" class="pf-max-tokens" value="' + escapeHtml(p.max_tokens) + '" placeholder="4096"></div>';
+    html += '<div class="edit-field"><label>Temperature</label><input type="number" step="0.05" min="0" max="2" class="pf-temperature" value="' + escapeHtml(p.temperature || '') + '" placeholder="不设置 (0.0–2.0)"></div>';
+    html += '<div class="edit-field"><label>Top P</label><input type="number" step="0.05" min="0" max="1" class="pf-top-p" value="' + escapeHtml(p.top_p || '') + '" placeholder="不设置 (0.0–1.0)"></div>';
     html += '<div class="edit-field full-row"><label>推理强度</label><div class="effort-tiles pf-effort">';
     var efforts = [{v:'',l:'不设置'},{v:'low',l:'low'},{v:'medium',l:'medium'},{v:'high',l:'high'},{v:'xhigh',l:'xhigh'},{v:'max',l:'max'}];
     for (var ei = 0; ei < efforts.length; ei++) {
@@ -863,6 +870,8 @@ html, body {
       model: el.querySelector('.pf-model').value.trim(),
       max_tokens: el.querySelector('.pf-max-tokens').value.trim(),
       reasoning_effort: effortEl ? effortEl.value : '',
+      temperature: el.querySelector('.pf-temperature').value.trim(),
+      top_p: el.querySelector('.pf-top-p').value.trim(),
     };
   }
 
@@ -1091,6 +1100,7 @@ html, body {
       setVal('arxiv_query', configData.arxiv_query);
       setVal('arxiv_max_results', configData.arxiv_max_results);
       setVal('arxiv_page_size', configData.arxiv_page_size);
+      setVal('arxiv_cache_ttl_hours', configData.arxiv_cache_ttl_hours);
       setVal('llm_max_workers', configData.llm_max_workers);
       setVal('llm_max_retries', configData.llm_max_retries);
       setVal('pdf_max_workers', configData.pdf_max_workers);
@@ -1162,7 +1172,7 @@ html, body {
   window.saveConfig = async function() {
     const payload = {};
     const fields = [
-      'arxiv_query','arxiv_max_results','arxiv_page_size',
+      'arxiv_query','arxiv_max_results','arxiv_page_size','arxiv_cache_ttl_hours',
       'llm_max_workers','llm_max_retries','pdf_max_workers',
       'insight_max_workers','insight_review_max_attempts',
       'auto_review_insight',
@@ -1252,7 +1262,7 @@ html, body {
   }
 
   function renderAddProviderForm() {
-    var p = { name:'', provider_type:'openai', base_url:'', api_keys:[''], model:'', max_tokens:'', reasoning_effort:'' };
+    var p = { name:'', provider_type:'openai', base_url:'', api_keys:[''], model:'', max_tokens:'', reasoning_effort:'', temperature:'', top_p:'' };
     var html = '<div class="provider-item provider-item-editing" id="addProviderForm">';
     html += providerFormFields(p, 'add');
     html += '<div class="provider-actions">';
@@ -1323,7 +1333,9 @@ html, body {
     if (vals.name !== orig.name || vals.provider_type !== orig.provider_type ||
         vals.base_url !== orig.base_url || vals.model !== orig.model ||
         vals.max_tokens !== orig.max_tokens ||
-        vals.reasoning_effort !== (orig.reasoning_effort || '')) {
+        vals.reasoning_effort !== (orig.reasoning_effort || '') ||
+        vals.temperature !== (orig.temperature || '') ||
+        vals.top_p !== (orig.top_p || '')) {
       return;
     }
     cancelInlineEdit();
@@ -1356,6 +1368,7 @@ html, body {
       base_url: p.base_url, api_keys: p.api_keys,
       model: p.model, max_tokens: p.max_tokens,
       reasoning_effort: p.reasoning_effort,
+      temperature: p.temperature || '', top_p: p.top_p || '',
       is_digest: p.is_digest, is_comment: p.is_comment,
       enabled: disabled ? 'true' : 'false',
     };
@@ -1387,6 +1400,7 @@ html, body {
           base_url: p.base_url, api_keys: p.api_keys,
           model: p.model, max_tokens: p.max_tokens,
           reasoning_effort: p.reasoning_effort,
+          temperature: p.temperature || '', top_p: p.top_p || '',
           is_digest: p.index === index ? 'true' : 'false',
           is_comment: p.is_comment, enabled: p.enabled,
         };
@@ -1408,6 +1422,7 @@ html, body {
           base_url: p.base_url, api_keys: p.api_keys,
           model: p.model, max_tokens: p.max_tokens,
           reasoning_effort: p.reasoning_effort,
+          temperature: p.temperature || '', top_p: p.top_p || '',
           is_digest: p.is_digest,
           is_comment: p.index === index ? 'true' : 'false',
           enabled: p.enabled,

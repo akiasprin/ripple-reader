@@ -337,7 +337,7 @@ impl Db {
                 WHERE paper_id NOT IN (SELECT id FROM deleted_papers) \
                 GROUP BY tag \
             ) \
-            SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract, p.processed_at, \
+            SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract_zh, p.processed_at, \
                    pi.insight, pi.processed_at as insight_processed_at, pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
             FROM papers p \
             LEFT JOIN paper_insights pi ON p.id = pi.paper_id \
@@ -393,7 +393,7 @@ impl Db {
                 JOIN interest_tags it ON pt.tag LIKE '%' || it.tag || '%' \
                 WHERE p.id NOT IN (SELECT id FROM deleted_papers) \
             ) \
-            SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract, p.processed_at, \
+            SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract_zh, p.processed_at, \
                    pi.insight, pi.processed_at as insight_processed_at, pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
             FROM papers p \
             LEFT JOIN paper_insights pi ON p.id = pi.paper_id \
@@ -460,7 +460,7 @@ impl Db {
                 JOIN interest_tags it ON pt.tag LIKE '%' || it.tag || '%' \
                 WHERE p.id NOT IN (SELECT id FROM deleted_papers) \
             ) \
-            SELECT DISTINCT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract, p.processed_at, \
+            SELECT DISTINCT p.id, p.title, p.authors, p.published, p.score, p.paper_type, p.summary, p.abstract_zh, p.processed_at, \
                    pi.insight, pi.processed_at as insight_processed_at, pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
             FROM papers p \
             LEFT JOIN paper_insights pi ON p.id = pi.paper_id \

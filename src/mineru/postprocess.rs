@@ -28,7 +28,182 @@ pub fn rebind_orphan_captions(
         *h = (*h * 1.3).clamp(600.0, 1000.0);
     }
 
-    for (cap_text, cap_bbox, cap_page) in orphans {
+    // Detect pages where MinerU systematically misplaced figure captions
+    // one block below their true body — a pattern seen in papers like
+    // 1603.04467 where every figure caption on a page sits just above the
+    // *next* figure/table body instead of below its own.  When two or more
+    // figure-caption orphans on the same page all sit above a candidate
+    // AND at least one sits above a type-mismatched candidate (e.g. a
+    // "Figure N" caption above a table body), we infer a page-wide
+    // downward shift and assign captions using top-to-bottom ordering.
+    // The type-mismatch check avoids false positives on pages where
+    // figures genuinely place captions above their own bodies (e.g.
+    // 2306.17844 Figure 15/16 — figure caption above figure body, no
+    // type mismatch).
+    let mut systematic_above_pages: std::collections::HashSet<i32> =
+        std::collections::HashSet::new();
+    {
+        // Per-page: (count_of_fig_caps_above_candidate, has_type_mismatch)
+        let mut page_stats: std::collections::HashMap<i32, (usize, bool)> =
+            std::collections::HashMap::new();
+        for (cap_text, cap_bbox, cap_page) in orphans {
+            let cap_bottom = cap_bbox[3];
+            let cap_num = extract_caption_number(cap_text);
+            let is_figure = cap_num.as_ref().is_some_and(|cn| cn.starts_with("F:"));
+            if !is_figure {
+                continue;
+            }
+            // Find the nearest candidate below this caption on the same page.
+            let mut nearest_below_type: Option<&str> = None;
+            let mut nearest_below_dist = f32::MAX;
+            for c in candidates.iter() {
+                if c.page_idx != *cap_page {
+                    continue;
+                }
+                let c_top = c.bbox[1];
+                if c_top < cap_bottom - 5.0 {
+                    continue; // candidate is above or overlapping caption
+                }
+                let dist = c_top - cap_bottom;
+                if dist < nearest_below_dist {
+                    nearest_below_dist = dist;
+                    nearest_below_type = Some(&c.block_type);
+                }
+            }
+            if let Some(below_type) = nearest_below_type {
+                let entry = page_stats.entry(*cap_page).or_insert((0, false));
+                entry.0 += 1;
+                // Type mismatch: figure caption above a table body.
+                if below_type == "table" {
+                    entry.1 = true;
+                }
+            }
+        }
+        for (&page, &(count, has_mismatch)) in &page_stats {
+            if count >= 2 && has_mismatch {
+                systematic_above_pages.insert(page);
+                info!(
+                    "[mineru] systematic above-caption shift detected on page {}: \
+                     {} figure caption(s) above a candidate, type mismatch present — using top-to-bottom assignment",
+                    page + 1,
+                    count
+                );
+            }
+        }
+    }
+
+    // Pre-assign figure captions on systematic-shift pages using top-to-bottom
+    // ordering.  Each figure-caption orphan (sorted by y-top ascending) is
+    // paired with the next available bare image/chart candidate on the same
+    // page (also sorted by y-top ascending).  This corrects MinerU's
+    // one-block-downward shift.  Pre-assigned pairs are removed from the
+    // main loop below.
+    let mut pre_assigned: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &page in &systematic_above_pages {
+        // Collect figure-caption orphans on this page, sorted by top.
+        let mut fig_orphans: Vec<(usize, f32, f32, [f32; 4])> = Vec::new(); // (orphan_idx, cap_top, cap_bottom, cap_bbox)
+        for (oi, (cap_text, cap_bbox, cap_page)) in orphans.iter().enumerate() {
+            if *cap_page != page {
+                continue;
+            }
+            if pre_assigned.contains(&oi) {
+                continue;
+            }
+            if !extract_caption_number(cap_text).is_some_and(|cn| cn.starts_with("F:")) {
+                continue;
+            }
+            fig_orphans.push((oi, cap_bbox[1], cap_bbox[3], *cap_bbox));
+        }
+        fig_orphans.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Collect bare image/chart/table candidates on this page, sorted by top.
+        // Include tables because in systematic-shift pages a figure caption
+        // may be mis-nested above a table body (e.g. 1603.04467 Figure 2
+        // above Table 1's body).
+        let mut bare_candidates: Vec<usize> = Vec::new();
+        for (ci, c) in candidates.iter().enumerate() {
+            if c.page_idx != page {
+                continue;
+            }
+            if c.block_type != "image" && c.block_type != "chart" && c.block_type != "table" {
+                continue;
+            }
+            // Must still be bare (placeholder desc).
+            if !c.desc.starts_with("image on page")
+                && !c.desc.starts_with("chart on page")
+                && !c.desc.starts_with("table on page")
+            {
+                continue;
+            }
+            bare_candidates.push(ci);
+        }
+
+        // Pair them up: each figure caption is assigned to the bare candidate
+        // that sits ABOVE it (reversing the usual caption-below convention).
+        // Captions without any bare candidate above them are skipped — their
+        // real body (e.g. a code block) is not in the candidate list.
+        for &(oi, cap_top, cap_bottom, cap_bbox) in &fig_orphans {
+            let (cap_text, _, _) = &orphans[oi];
+            // Find the bare candidate closest above this caption, sorted by
+            // y-bottom descending (nearest first).
+            let mut best_ci: Option<usize> = None;
+            let mut best_cand_bottom: f32 = f32::NEG_INFINITY;
+            for &ci in &bare_candidates {
+                let cand_bottom = candidates[ci].bbox[3];
+                if cand_bottom > cap_top {
+                    continue; // candidate is below the caption, not above
+                }
+                if cand_bottom > best_cand_bottom {
+                    best_cand_bottom = cand_bottom;
+                    best_ci = Some(ci);
+                }
+            }
+            let Some(ci) = best_ci else {
+                info!(
+                    "[mineru] systematic-shift skip: page {} '{}' has no bare candidate above it — real body likely not an image/chart/table",
+                    page + 1,
+                    &cap_text[..cap_text.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cap_text.len())]
+                );
+                continue;
+            };
+            let cap_num = extract_caption_number(cap_text);
+            let prev_bbox = candidates[ci].bbox;
+            let new_bbox = union_bbox(prev_bbox, cap_bbox);
+            let would_engulf = candidates.iter().enumerate().any(|(j, other)| {
+                j != ci
+                    && other.page_idx == page
+                    && !is_noise(other)
+                    && (bbox_contains(new_bbox, other.body_bbox)
+                        || bbox_overlap_ratio(new_bbox, other.body_bbox) > 0.5)
+            });
+            let c = &mut candidates[ci];
+            c.desc = cap_text.clone();
+            if cap_num.is_some() {
+                c.caption_number = cap_num;
+            }
+            if !would_engulf {
+                c.bbox = new_bbox;
+            }
+            info!(
+                "[mineru] systematic-shift rebind: page {} '{}' -> {} candidate above (cap_y=[{:.1},{:.1}], body_y=[{:.1},{:.1}]), bbox=[{:.1},{:.1},{:.1},{:.1}]",
+                page + 1,
+                &cap_text[..cap_text.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cap_text.len())],
+                c.block_type,
+                cap_top, cap_bottom,
+                prev_bbox[1], prev_bbox[3],
+                c.bbox[0], c.bbox[1], c.bbox[2], c.bbox[3]
+            );
+            pre_assigned.insert(oi);
+            // Remove this candidate from bare_candidates so it won't be reused.
+            bare_candidates.retain(|&x| x != ci);
+        }
+    }
+
+    for (oi, (cap_text, cap_bbox, cap_page)) in orphans.iter().enumerate() {
+        // Skip orphans already assigned by the systematic-shift pass above.
+        if pre_assigned.contains(&oi) {
+            continue;
+        }
         // Guard against double-rebinding the same orphan in a second pass:
         // if a candidate on this page already carries this caption number,
         // the orphan has already been consumed and must not be re-bound again
@@ -89,8 +264,28 @@ pub fn rebind_orphan_captions(
         let cap_right = cap_bbox[2];
         let page_h = page_heights.get(cap_page).copied().unwrap_or(800.0);
 
+        // Genuine above-caption detection: if a confirmed-caption candidate
+        // exists above this orphan on the same page, the orphan is likely a
+        // real caption-above-figure (not a mis-nested caption from the row
+        // above).  Don't penalise the body-below direction in that case —
+        // the space above is already occupied by another figure.
+        // Example: 2306.17844 Figure 16 caption at y361 has Figure 15 above
+        // it, so its body must be below.
+        let has_captioned_above = candidates.iter().any(|oc| {
+            oc.page_idx == *cap_page
+                && oc.caption_number.is_some()
+                && !oc.desc.starts_with("image on page")
+                && !oc.desc.starts_with("chart on page")
+                && !oc.desc.starts_with("table on page")
+                && oc.bbox[3] < cap_top + 5.0 // candidate bottom above caption top
+        });
+
         let mut best_idx = None;
         let mut best_distance = f32::MAX;
+        // Selection score = distance plus a directional-convention penalty.
+        // Tracked separately from `best_distance` so the chosen candidate's
+        // raw gap is still reported in the rebind log.
+        let mut best_score = f32::MAX;
 
         for (idx, c) in candidates.iter().enumerate() {
             if c.page_idx != *cap_page {
@@ -112,20 +307,20 @@ pub fn rebind_orphan_captions(
                 ));
                 continue;
             }
-            // Direction check.  Figure/chart captions are usually below the
-            // body; table captions are usually above.  Allow either direction
-            // for table candidates (caption can be above OR below the body)
-            // but keep the strict caption-below-body rule for image/chart
-            // candidates to match typical figure layouts.
+            // Direction check.  A figure caption is conventionally placed BELOW
+            // its body and a table caption ABOVE, but either can occur, so we
+            // accept both directions here and express the convention as a
+            // selection *preference* further below.  Accepting caption-above
+            // for image/chart lets a figure whose caption sits above its body
+            // rebind (e.g. 2306.17844 Figure 20, caption at the page top); the
+            // preference stops a caption mis-nested from the row above (e.g.
+            // 1312.5602 Figure 2, sandwiched between two panel rows) from
+            // binding to the row beneath it instead of the row it describes.
             let img_top = c.bbox[1];
             let img_bottom = c.bbox[3];
             let cap_below_img = img_bottom < cap_top + 5.0;
             let cap_above_img = cap_bottom < img_top + 5.0;
-            let direction_ok = if c.block_type == "table" {
-                cap_below_img || cap_above_img
-            } else {
-                cap_below_img
-            };
+            let direction_ok = cap_below_img || cap_above_img;
             if !direction_ok {
                 pp_info(&format!(
                     "[mineru] orphan rebind skip: candidate[{}] type={} img=[{:.1},{:.1}] cap=[{:.1},{:.1}] (neither above nor below), ignoring orphan '{}'",
@@ -170,11 +365,16 @@ pub fn rebind_orphan_captions(
                 ));
                 continue;
             }
-            // Type mismatch guard: a table caption should not bind to an image
-            // candidate (and vice versa).  Only apply when a same-type bare
-            // candidate exists on this page — if every bare candidate is the
-            // "wrong" type we accept a cross-type rebind rather than losing
-            // the caption entirely (e.g. 2407.08608 Figure 4 → bare table).
+            // Type mismatch: a table caption should prefer a table candidate
+            // and a figure caption should prefer an image/chart candidate.
+            // When a same-type bare candidate exists on this page, penalise
+            // cross-type bindings rather than skipping them entirely.  A hard
+            // skip can cascade into lost captions when MinerU mis-types a
+            // figure body as "table" (e.g. 2112.10752 Figure 5 is a grid of
+            // sample images rendered as an HTML table — the "Figure 5" caption
+            // must bind to the table block because geometrically it is the
+            // only viable match, with near-perfect overlap and 8pt distance).
+            let mut type_mismatch = false;
             if let Some(ref cap_num) = extract_caption_number(cap_text) {
                 let caption_is_table = cap_num.starts_with("T:");
                 let candidate_is_table = c.block_type == "table";
@@ -185,23 +385,11 @@ pub fn rebind_orphan_captions(
                             || oc.desc.starts_with("chart on page"))
                         && (caption_is_table == (oc.block_type == "table"))
                 });
-                if has_same_type_bare {
-                    if caption_is_table && !candidate_is_table {
-                        pp_info(&format!(
-                            "[mineru] orphan rebind skip: candidate[{}] type={} does not match table caption '{}', ignoring orphan",
-                            idx, c.block_type,
-                            &cap_text[..cap_text.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cap_text.len())]
-                        ));
-                        continue;
-                    }
-                    if !caption_is_table && candidate_is_table {
-                        pp_info(&format!(
-                            "[mineru] orphan rebind skip: candidate[{}] type={} does not match figure caption '{}', ignoring orphan",
-                            idx, c.block_type,
-                            &cap_text[..cap_text.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cap_text.len())]
-                        ));
-                        continue;
-                    }
+                if has_same_type_bare
+                    && ((caption_is_table && !candidate_is_table)
+                        || (!caption_is_table && candidate_is_table))
+                {
+                    type_mismatch = true;
                 }
             }
             // Require significant horizontal overlap — the caption should
@@ -242,9 +430,7 @@ pub fn rebind_orphan_captions(
                 continue;
             }
 
-            // Distance is the gap in the chosen direction.  Prefer below over
-            // above for tables when both directions are possible (figure-like
-            // layouts inside table candidates).
+            // Distance is the gap in the chosen direction.
             let distance = if cap_below_img {
                 cap_top - img_bottom
             } else {
@@ -262,7 +448,46 @@ pub fn rebind_orphan_captions(
                 ));
                 continue;
             }
-            if distance < best_distance {
+            // Selection preference: bias toward the conventional caption-below-
+            // figure position for image/chart.  An image sitting BELOW the
+            // caption (caption above the figure) is penalised so it only wins
+            // when no caption-below-figure candidate exists — this keeps the
+            // 2306.17844 Figure 20 binding (nothing above the caption) while
+            // preventing the 1312.5602 Figure 2 mis-bind to the lower panel
+            // row.
+            //
+            // EXCEPTION: when a page has a systematic above-caption shift
+            // (detected above — multiple figure-caption orphans all sitting
+            // above every candidate), the convention is reversed: penalise
+            // caption-BELOW-figure and prefer caption-ABOVE-figure.  This
+            // handles papers like 1603.04467 where MinerU mis-nested every
+            // figure caption into the block below its true body.
+            let is_figure = c.block_type == "image" || c.block_type == "chart";
+            let reversed = systematic_above_pages.contains(cap_page);
+            let unconventional = is_figure && cap_above_img && !cap_below_img;
+            // Only penalise unconventional caption-above-figure when there is
+            // NO confirmed-caption candidate above the orphan.  If another
+            // captioned figure already sits above, this orphan is a genuine
+            // above-caption and the body below should not be penalised.
+            let mut score = if reversed && is_figure && !unconventional && cap_below_img {
+                // Caption below figure on a systematic-above page: penalise.
+                distance + page_h
+            } else if !reversed && unconventional && !has_captioned_above {
+                // Caption above figure on a normal page: penalise, unless a
+                // confirmed figure already sits above (genuine above-caption).
+                distance + page_h
+            } else {
+                distance
+            };
+            // Type-mismatch penalty: prefer same-type binding when alternatives
+            // exist, but don't hard-skip — a cross-type candidate that is
+            // geometrically far superior can still win (e.g. 2112.10752 Figure
+            // 5, whose sample grid is rendered as an HTML table).
+            if type_mismatch {
+                score += page_h * 0.5;
+            }
+            if score < best_score {
+                best_score = score;
                 best_distance = distance;
                 best_idx = Some(idx);
             }
@@ -351,9 +576,11 @@ pub fn rebind_orphan_captions(
 /// versa).  When we find a type-mismatched pair on the same page — one
 /// table with a figure caption and one image/chart with a table caption —
 /// swap their captions so each goes to the correct type.
-pub fn swap_mismatched_captions(candidates: &mut [RawBlock]) {
+pub fn swap_mismatched_captions(candidates: &mut [RawBlock], split_figures: &[String]) {
     let n = candidates.len();
     let mut swapped = vec![false; n];
+
+    // ---- Phase 1: swap two mismatched blocks on the same page ----
     for i in 0..n {
         if swapped[i] {
             continue;
@@ -426,6 +653,108 @@ pub fn swap_mismatched_captions(candidates: &mut [RawBlock]) {
             }
         }
     }
+
+    // ---- Phase 2: migrate mismatched caption to same-type bare block ----
+    // When a block carries a type-mismatched caption (e.g. a table block
+    // labelled "Figure 3") and no swap partner was found, look for a bare
+    // placeholder block of the matching type on the same page.  This handles
+    // the 1607.06450 case where MinerU attached "Figure 3" to Table 3's
+    // para_block instead of the actual Figure 3 image block.
+    for i in 0..n {
+        if swapped[i] {
+            continue;
+        }
+        let a = &candidates[i];
+        let a_is_table = a.block_type == "table";
+        let a_cap = extract_caption_number(&a.desc);
+        let a_mismatch = match a_cap {
+            Some(ref cn) if a_is_table => cn.starts_with("F:"),
+            Some(ref cn) if !a_is_table => cn.starts_with("T:"),
+            _ => false,
+        };
+        if !a_mismatch {
+            continue;
+        }
+        let cap_num = a_cap.unwrap();
+        // Skip split-figure captions — their layout is non-standard.
+        if split_figures.contains(&cap_num) {
+            continue;
+        }
+        let target_is_table = cap_num.starts_with("T:");
+
+        // Find the nearest bare block of the matching type on the same page.
+        let mut best_idx = None;
+        let mut best_dist = f32::MAX;
+        for j in 0..n {
+            if i == j || swapped[j] {
+                continue;
+            }
+            let b = &candidates[j];
+            if b.page_idx != a.page_idx {
+                continue;
+            }
+            // Target must lack a caption — either a bare placeholder or a
+            // merged composite whose desc is a sub-panel label like
+            // "(a) SICK(r); (b) SICK(MSE); ..." with caption_number=None.
+            if b.caption_number.is_some() {
+                continue;
+            }
+            let type_ok = if target_is_table {
+                b.block_type == "table"
+            } else {
+                b.block_type == "image" || b.block_type == "chart"
+            };
+            if !type_ok {
+                continue;
+            }
+            // Distance: vertical gap between the two blocks.
+            let a_bottom = a.body_bbox[1].max(a.body_bbox[3]);
+            let b_top = b.body_bbox[1].min(b.body_bbox[3]);
+            let b_bottom = b.body_bbox[1].max(b.body_bbox[3]);
+            let dist = if a_bottom < b_top {
+                b_top - a_bottom
+            } else if b_bottom < a_bottom {
+                a_bottom - b_bottom
+            } else {
+                0.0 // overlapping vertically
+            };
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = Some(j);
+            }
+        }
+
+        if let Some(j) = best_idx {
+            // Migrate caption from mismatched block to the bare target.
+            let cap_desc = candidates[i].desc.clone();
+            let cap_number = candidates[i].caption_number.clone();
+            candidates[j].desc = cap_desc;
+            candidates[j].caption_number = cap_number;
+            // Revert the mismatched block to a bare placeholder so it can
+            // participate in orphan rebind for its own correct caption.
+            candidates[i].desc = format!(
+                "{} on page {}, bbox[{}, {}, {}, {}]",
+                candidates[i].block_type,
+                candidates[i].page_idx + 1,
+                candidates[i].body_bbox[0],
+                candidates[i].body_bbox[1],
+                candidates[i].body_bbox[2],
+                candidates[i].body_bbox[3],
+            );
+            candidates[i].caption_number = None;
+            // Shrink bbox back to body-only (drop the wrong caption strip).
+            candidates[i].bbox = candidates[i].body_bbox;
+            swapped[i] = true;
+            swapped[j] = true;
+            pp_info(&format!(
+                "[mineru] Migrated mismatched caption: '{}' -> bare {}[{}] on page {}",
+                candidates[j].desc,
+                candidates[j].block_type,
+                j,
+                candidates[j].page_idx + 1,
+            ));
+        }
+    }
 }
 
 /// Merge overlapping/adjacent blocks on the same page and drop noise.
@@ -466,6 +795,9 @@ pub fn post_process_blocks(
 
     // Group by page, filtering noise but preserving image/chart blocks
     // on pages with exactly one figure caption (composite sub-panels).
+    // Tiny logos/icons (e.g. 17x20pt arXiv logo on 2605.08078 page 1) are
+    // filtered regardless of the unique-caption guard — they are never
+    // legitimate sub-panels.
     let mut by_page: HashMap<i32, Vec<RawBlock>> = HashMap::new();
     for b in blocks {
         let has_unique_fig = page_fig_caps
@@ -479,7 +811,17 @@ pub fn post_process_blocks(
         let is_relevant_image =
             (b.block_type == "image" || b.block_type == "chart") && has_unique_fig;
         let is_relevant_table = b.block_type == "table" && has_unique_tbl;
-        if is_noise(&b) && !is_relevant_image && !is_relevant_table {
+
+        let [x0, y0, x1, y1] = b.bbox;
+        let w = (x1 - x0).abs();
+        let h = (y1 - y0).abs();
+        let is_tiny_logo = (b.desc.starts_with("image on page")
+            || b.desc.starts_with("chart on page")
+            || b.desc.starts_with("table on page"))
+            && w < 25.0
+            && h < 25.0;
+
+        if (is_noise(&b) && !is_relevant_image && !is_relevant_table) || is_tiny_logo {
             continue;
         }
         by_page.entry(b.page_idx).or_default().push(b);
@@ -800,6 +1142,23 @@ pub fn post_process_blocks(
         merged = final_merged;
 
         let mut merged: Vec<RawBlock> = merged.into_iter().map(|(b, _)| b).collect();
+
+        // Filter out noise blocks that never received a caption.  On pages
+        // with a unique figure/table caption the singleton-preservation logic
+        // keeps noise blocks (e.g. author-affiliation bars mis-classified as
+        // image by MinerU) in the list so they are not lost if they are
+        // genuine sub-panels.  After propagation and merge, any noise block
+        // that still has no caption is almost certainly not a sub-panel and
+        // should be dropped.
+        let before_filter = merged.len();
+        merged.retain(|b| !(is_noise(b) && b.caption_number.is_none()));
+        if merged.len() < before_filter {
+            pp_info(&format!(
+                "[mineru] page {}: filtered {} noise block(s) without caption",
+                _page_idx + 1,
+                before_filter - merged.len()
+            ));
+        }
 
         repair_leaked_caption_containers(&mut merged);
 
@@ -1231,18 +1590,29 @@ pub fn propagate_captions(
     for (ci, comp) in components.iter().enumerate() {
         // Anchors: indices in `comp` whose caption is type-compatible with
         // their block_type.  Mis-typed captions (e.g. T:7 on an image block)
-        // are not trusted as anchors and may be overwritten by propagation.
-        let anchors: Vec<usize> = comp
+        // are normally not trusted as anchors.  But when no type-matched
+        // anchor exists in the component, fall back to type-mismatched
+        // anchors — MinerU mis-typed the block (e.g. 1608.05343 page 11:
+        // "Table 2" caption on a chart block), and selected_captions already
+        // validated the spatial proximity.
+        let mut anchors: Vec<usize> = comp
             .iter()
             .copied()
             .filter(|&i| {
                 blocks[i]
                     .caption_number
                     .as_ref()
-                    .map(|c| !is_caption_type_mismatch(c, &blocks[i].block_type))
-                    .unwrap_or(false)
+                    .is_some_and(|c| !is_caption_type_mismatch(c, &blocks[i].block_type))
             })
             .collect();
+        if anchors.is_empty() {
+            // Fall back to any captioned block in the component.
+            anchors = comp
+                .iter()
+                .copied()
+                .filter(|&i| blocks[i].caption_number.is_some())
+                .collect();
+        }
 
         let captions: std::collections::HashSet<String> = anchors
             .iter()
@@ -1282,6 +1652,12 @@ pub fn propagate_captions(
         let mut propagated_in_comp = 0usize;
         let mut ambiguous_in_comp = 0usize;
         for &i in comp {
+            // Skip noise blocks so mis-classified strips (e.g. author
+            // affiliation bars tagged as image by MinerU) do not inherit
+            // a caption and get merged into the real figure.
+            if is_noise(&blocks[i]) {
+                continue;
+            }
             // Don't overwrite blocks that already carry a valid caption.
             let cur_cap_valid = blocks[i]
                 .caption_number
@@ -1450,6 +1826,22 @@ fn propagate_page_unique_caption(blocks: &mut [RawBlock]) -> usize {
         if b.caption_number.is_some() {
             continue;
         }
+        // Skip banner-like noise blocks (e.g. author-affiliation bars mis-
+        // classified as image blocks by MinerU) so they do not inherit the
+        // page's unique caption.  Tiny sub-panels of a composite figure are
+        // kept: on a page with exactly one figure caption there is no other
+        // figure for them to belong to, and `post_process_blocks` already
+        // preserved them from the global noise filter.
+        if is_noise(b) {
+            let [x0, y0, x1, y1] = b.bbox;
+            let w = (x1 - x0).abs();
+            let h = (y1 - y0).abs();
+            let ratio = w.max(h) / w.min(h).max(1.0);
+            let is_banner = w > 300.0 && h < 55.0 && ratio > 6.0;
+            if is_banner {
+                continue;
+            }
+        }
         let cap = match b.block_type.as_str() {
             "image" | "chart" => unique_fig.as_ref(),
             "table" => unique_tbl.as_ref(),
@@ -1564,8 +1956,9 @@ pub(crate) fn is_noise(b: &RawBlock) -> bool {
 }
 
 /// Whether a block's description is a bare placeholder generated by
-/// MinerU (e.g. "image on page 23").  These blocks carry no semantic
-/// content of their own and are likely sub-panels of a composite figure.
+/// MinerU (e.g. "image on page 23, bbox[...]").  These blocks carry no
+/// semantic content of their own and are likely sub-panels of a composite
+/// figure.
 fn is_generic_placeholder(b: &RawBlock) -> bool {
     b.desc.starts_with("image on page")
         || b.desc.starts_with("chart on page")
@@ -1630,12 +2023,17 @@ pub fn should_merge_geometry_only(a: &RawBlock, b: &RawBlock, page_w: f32, _page
     {
         let [ax0, ay0, ax1, ay1] = get_geom_bbox(a);
         let [bx0, by0, bx1, by1] = get_geom_bbox(b);
+        let a_w = (ax1 - ax0).abs();
         let a_h = (ay1 - ay0).abs();
+        let b_w = (bx1 - bx0).abs();
         let b_h = (by1 - by0).abs();
         let v_overlap = (ay1.min(by1) - ay0.max(by0)).max(0.0);
+        let h_overlap = (ax1.min(bx1) - ax0.max(bx0)).max(0.0);
         let min_h = a_h.min(b_h).max(1.0);
-        let same_row = v_overlap > 0.0 && (v_overlap / min_h) > 0.5;
+        let min_w = a_w.min(b_w).max(1.0);
         let height_similar = a_h.max(b_h) / min_h < 2.5;
+        let width_similar = a_w.max(b_w) / min_w < 2.5;
+
         let h_gap = if ax1 < bx0 {
             bx0 - ax1
         } else if bx1 < ax0 {
@@ -1643,7 +2041,27 @@ pub fn should_merge_geometry_only(a: &RawBlock, b: &RawBlock, page_w: f32, _page
         } else {
             0.0
         };
-        if !(same_row && height_similar && h_gap < 25.0) {
+        let v_gap = if ay1 < by0 {
+            by0 - ay1
+        } else if by1 < ay0 {
+            ay0 - by1
+        } else {
+            0.0
+        };
+
+        // Side-by-side sub-panels (e.g. 2407.08608 WGMMA layouts).
+        let same_row =
+            v_overlap > 0.0 && (v_overlap / min_h) > 0.5 && height_similar && h_gap < 25.0;
+        // Vertically-stacked sub-panels: a table mis-classified as part of a
+        // multi-row composite figure (e.g. 2604.14142 Figure 12 (a) table
+        // above (b) image).  Require strong horizontal overlap and similar
+        // widths so unrelated tables below a figure are not linked.  Use
+        // min_h for the gap threshold so a small sub-panel is not linked to a
+        // much taller unrelated block below it (e.g. 2604.21428 Figure 14).
+        let same_col =
+            h_overlap > 0.0 && (h_overlap / min_w) > 0.5 && width_similar && v_gap < min_h * 0.5;
+
+        if !(same_row || same_col) {
             return false;
         }
     }
@@ -1915,27 +2333,54 @@ pub fn should_merge(
         _ => {}
     }
 
-    // Interline_equation must not merge with figures/tables.
+    // Interline_equation must not merge with figures/tables, EXCEPT when the
+    // equation block is fully contained inside a captioned figure/chart.
+    // MinerU sometimes mis-labels part of a figure (e.g. a diagram with text
+    // and arrows) as interline_equation; in that case the equation is actually
+    // figure content and should be absorbed (e.g. 2304.10557 Figure 7).
     let a_is_interline = a.block_type == "interline_equation";
     let b_is_interline = b.block_type == "interline_equation";
     if a_is_interline != b_is_interline {
+        let (fig, eq) = if a_is_interline { (b, a) } else { (a, b) };
+        let fig_is_image_or_chart = fig.block_type == "image" || fig.block_type == "chart";
+        let fig_has_caption = fig
+            .caption_number
+            .as_ref()
+            .is_some_and(|c| c.starts_with("F:"))
+            || extract_caption_number(&fig.desc)
+                .as_ref()
+                .is_some_and(|c| c.starts_with("F:"));
+        let eq_inside_fig = bbox_contains(fig.bbox, eq.bbox);
+        if !(fig_is_image_or_chart && fig_has_caption && eq_inside_fig) {
+            info!(
+                "[should_merge] false: interline_equation cross-type | '{}' vs '{}'",
+                desc_snippet(&a.desc, 25),
+                desc_snippet(&b.desc, 25)
+            );
+            return false;
+        }
         info!(
-            "[should_merge] false: interline_equation cross-type | '{}' vs '{}'",
+            "[should_merge] true: interline_equation inside figure '{}' | '{}' vs '{}'",
+            fig.caption_number.as_deref().unwrap_or("?"),
             desc_snippet(&a.desc, 25),
             desc_snippet(&b.desc, 25)
         );
-        return false;
+        return true;
     }
 
     // "chart" and "image" are both figure types — treat as equivalent
     // so sub-panels of the same figure can merge (e.g. 1312.5602 page 7).
+    // Also allow cross-type merge when one side is a bare placeholder and the
+    // other carries a type-mismatched caption (e.g. 1608.05343 page 11: a bare
+    // table block must merge with a chart block that carries "Table 2").
     if !same_block_type(&a.block_type, &b.block_type)
         && (a.caption_number.is_some() || b.caption_number.is_some())
     {
         let same_caption = a.caption_number.is_some()
             && b.caption_number.is_some()
             && a.caption_number == b.caption_number;
-        if !same_caption {
+        let one_bare = a.caption_number.is_none() || b.caption_number.is_none();
+        if !same_caption && !one_bare {
             info!(
                 "[should_merge] false: cross-type {} vs {} | '{}' vs '{}'",
                 a.block_type,
@@ -2017,25 +2462,28 @@ pub fn should_merge(
         } else {
             ((page_w * 0.08).max(20.0), (page_h * 0.04).max(10.0))
         }
+    } else if both_no_cap {
+        // Both uncaptioned: keep vertical threshold strict so independent
+        // figures on different rows (e.g. 2303.00848 pages 27-28) stay
+        // separate.  Horizontal threshold stays relaxed so side-by-side
+        // sub-panels on the same row (e.g. 2303.00848 page 15) merge.
+        ((page_w * 0.25).max(40.0), (page_h * 0.03).max(10.0))
+    } else if same_confirmed_cap {
+        // Sub-panels sharing a confirmed caption (e.g. multi-row figure
+        // linked by propagate_captions): allow larger gaps so the whole
+        // composite merges into one image.
+        ((page_w * 0.25).max(40.0), (page_h * 0.22).max(60.0))
     } else {
-        if both_no_cap && !aligned2 {
-            ((page_w * 0.10).max(20.0), (page_h * 0.08).max(20.0))
+        // One block has a caption, the other might be a generic placeholder
+        // sub-panel (e.g. 2604.13030 page 10).
+        let a_is_generic = is_generic_placeholder(a);
+        let b_is_generic = is_generic_placeholder(b);
+        let v_thresh = if a_is_generic || b_is_generic {
+            (page_h * 0.22).max(60.0)
         } else {
-            // For blocks that already share a confirmed caption (e.g. sub-panels
-            // of a multi-row figure linked by propagate_captions), allow larger
-            // vertical gaps so the whole composite merges into one image.
-            // Generic placeholders ("image on page N") also get the larger
-            // threshold because they are likely bare sub-panels of a composite
-            // figure (e.g. 2604.13030 page 10).
-            let a_is_generic = is_generic_placeholder(a);
-            let b_is_generic = is_generic_placeholder(b);
-            let v_thresh = if same_confirmed_cap || a_is_generic || b_is_generic {
-                (page_h * 0.22).max(60.0)
-            } else {
-                (page_h * 0.12).max(40.0)
-            };
-            ((page_w * 0.25).max(40.0), v_thresh)
-        }
+            (page_h * 0.12).max(40.0)
+        };
+        ((page_w * 0.25).max(40.0), v_thresh)
     };
 
     let h_overlap = (ax1.min(bx1) - ax0.max(bx0)).max(0.0);

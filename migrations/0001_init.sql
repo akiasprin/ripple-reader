@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS papers (
     score REAL NOT NULL,
     paper_type TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL,
-    abstract TEXT NOT NULL,
+    abstract_zh TEXT NOT NULL,
+    abstract_en TEXT NOT NULL DEFAULT '',
     processed_at TIMESTAMPTZ NOT NULL,
     source_type TEXT NOT NULL DEFAULT 'arxiv',
     source_url TEXT,
@@ -153,6 +154,6 @@ CREATE INDEX IF NOT EXISTS idx_backups_paper ON paper_insight_backups(paper_id);
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_papers_title_trgm ON papers USING GIN (title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_papers_summary_trgm ON papers USING GIN (summary gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_papers_abstract_trgm ON papers USING GIN (abstract gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_papers_abstract_zh_trgm ON papers USING GIN (abstract_zh gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_paper_insights_insight_trgm ON paper_insights USING GIN (insight gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_paper_insights_review_trgm ON paper_insights USING GIN (review gin_trgm_ops);

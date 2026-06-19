@@ -142,6 +142,33 @@ export const bootstrap = {
       if (dropdown && !dropdown.contains(e.target)) {
         dropdown.classList.remove('open');
       }
+      // Clicking outside an active highlight clears the active selection
+      // but keeps the comments panel open.
+      if (this.activeCommentId != null) {
+        const mark = e.target.closest('.comment-highlight, img.comment-highlight-img');
+        if (!mark) {
+          this.activeCommentId = null;
+          this.updateHighlightActive();
+        }
+      }
+      // Close TOC / progress panels when clicking outside them or their toggle bars.
+      const tocPanel = document.getElementById('insightTOC');
+      const progressPanel = document.getElementById('insightProgressPanel');
+      if (tocPanel?.classList.contains('show') && !e.target.closest('#insightTOC, #insightTocBar')) {
+        this._toggleTOC();
+      }
+      if (progressPanel?.classList.contains('show') && !e.target.closest('#insightProgressPanel, #progressBar')) {
+        this.toggleProgressCollapse();
+      }
+      // Close mobile comment panel when clicking outside it or its toggle bar.
+      // Ignore clicks on the reply bubble/overlay so opening a reply doesn't
+      // accidentally close the comments panel.
+      if (!this.isDesktopViewport()) {
+        const commentsPanel = document.getElementById('insightCommentsPanel');
+        if (commentsPanel?.classList.contains('open') && !e.target.closest('#insightCommentsPanel, #commentsToggleBtn, #replyBubble, #replyBubbleOverlay')) {
+          this.hideCommentsPanel();
+        }
+      }
     });
     this.initTheme();
     // iOS keyboard visibility: hide bottom fixed elements when keyboard opens
@@ -184,18 +211,9 @@ export const bootstrap = {
       await this.load();
     }
     this.startProgressPolling();
-    const hasSeenProgress = localStorage.getItem('progressPanelSeen');
-    this.progressCollapsed = !!hasSeenProgress;
-    if (!hasSeenProgress) {
-      localStorage.setItem('progressPanelSeen', '1');
-      // Auto-collapse progress panel after 0.5s on first visit only
-      setTimeout(() => {
-        if (!this.progressCollapsed) {
-          this.progressCollapsed = true;
-          this.fetchProgress();
-        }
-      }, 500);
-    }
+    // Keep progress panel collapsed by default so it doesn't obstruct the page.
+    this.progressCollapsed = true;
+    localStorage.setItem('progressPanelSeen', '1');
     // Progress bar click to expand
     const progressBar = document.getElementById('progressBar');
     if (progressBar) {

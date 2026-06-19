@@ -17,6 +17,14 @@ pub struct InsightProvider {
     pub reasoning_effort: Option<String>,
     pub output_config_effort: Option<String>,
     pub user_agent: Option<String>,
+    /// Sampling temperature for OpenAI / Anthropic chat-completions / messages
+    /// requests. `None` means "use the upstream server default" — no
+    /// `temperature` key is sent on the wire.
+    pub temperature: Option<f32>,
+    /// Nucleus-sampling cutoff. Same "unset = server default" contract as
+    /// `temperature`. Anthropic recommends setting either `temperature` OR
+    /// `top_p`, not both; we surface both and let the user decide.
+    pub top_p: Option<f32>,
     pub is_digest: bool,
     pub is_comment: bool,
     pub enabled: bool,
@@ -34,6 +42,7 @@ pub struct Config {
     pub arxiv_categories: Vec<String>,
     pub arxiv_keywords: Vec<String>,
     pub arxiv_fetch_cron: String,
+    pub arxiv_cache_ttl_hours: usize,
 
     pub summarize_prompt: String,
     pub translate_prompt: String,
@@ -100,6 +109,10 @@ impl Config {
         let arxiv_fetch_cron = env::var("ARXIV_FETCH_CRON")
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "0 30 14 * * *".to_string());
+        let arxiv_cache_ttl_hours = env::var("ARXIV_CACHE_TTL_HOURS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(48);
 
         // --- Prompts & DB ---
         let load_prompt = |file: &str| -> Result<String> {
@@ -216,6 +229,47 @@ impl Config {
                 // Same value drives both OpenAI (reasoning_effort) and Anthropic (output_config_effort)
                 let provider_output_effort = provider_reasoning.clone();
 
+                let temperature = env::var(format!("INSIGHT_PROVIDER_{}_TEMPERATURE", i))
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|v| match v.parse::<f32>() {
+                        Ok(t) if (0.0..=2.0).contains(&t) => Some(t),
+                        Ok(t) => {
+                            info!(
+                                "INSIGHT_PROVIDER_{}_TEMPERATURE = {} is out of [0,2]; ignoring",
+                                i, t
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            info!(
+                                "INSIGHT_PROVIDER_{}_TEMPERATURE = {:?} is not a number: {}",
+                                i, v, e
+                            );
+                            None
+                        }
+                    });
+                let top_p = env::var(format!("INSIGHT_PROVIDER_{}_TOP_P", i))
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|v| match v.parse::<f32>() {
+                        Ok(p) if (0.0..=1.0).contains(&p) => Some(p),
+                        Ok(p) => {
+                            info!(
+                                "INSIGHT_PROVIDER_{}_TOP_P = {} is out of [0,1]; ignoring",
+                                i, p
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            info!(
+                                "INSIGHT_PROVIDER_{}_TOP_P = {:?} is not a number: {}",
+                                i, v, e
+                            );
+                            None
+                        }
+                    });
+
                 let is_digest = env::var(format!("INSIGHT_PROVIDER_{}_IS_DIGEST", i))
                     .ok()
                     .map(|v| v.eq_ignore_ascii_case("true"))
@@ -228,7 +282,7 @@ impl Config {
 
                 let enabled = env::var(format!("INSIGHT_PROVIDER_{}_ENABLED", i))
                     .ok()
-                    .map(|v| v.eq_ignore_ascii_case("false"))
+                    .map(|v| !v.eq_ignore_ascii_case("false"))
                     .unwrap_or(true);
 
                 anyhow::ensure!(
@@ -252,6 +306,8 @@ impl Config {
                     reasoning_effort: provider_reasoning,
                     output_config_effort: provider_output_effort,
                     user_agent: None,
+                    temperature,
+                    top_p,
                     is_digest,
                     is_comment,
                     enabled,
@@ -282,6 +338,12 @@ impl Config {
         info!("ARXIV_MAX_RESULTS = {}", arxiv_max_results);
         info!("ARXIV_PAGE_SIZE = {}", arxiv_page_size);
         info!("ARXIV_FETCH_CRON = {}", arxiv_fetch_cron);
+        info!("ARXIV_CACHE_TTL_HOURS = {}", arxiv_cache_ttl_hours);
+        // Sync the .env-loaded value into the in-process atomic used by
+        // read_cache(). Without this, the atomic stays at its static default
+        // (48h) until an admin UI update fires, even though .env says
+        // ARXIV_CACHE_TTL_HOURS=1000.
+        crate::source::arxiv::set_cache_ttl_hours(arxiv_cache_ttl_hours);
         info!("DATABASE_URL = {}", database_url);
         info!(
             "INSIGHT_PROVIDERS = {} provider(s)",
@@ -346,6 +408,7 @@ impl Config {
             arxiv_categories,
             arxiv_keywords,
             arxiv_fetch_cron,
+            arxiv_cache_ttl_hours,
 
             summarize_prompt,
             translate_prompt,

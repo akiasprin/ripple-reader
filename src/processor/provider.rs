@@ -103,6 +103,40 @@ pub(super) struct Message {
     pub(super) content: MessageContent,
 }
 
+/// Merge a new Anthropic message into the previous one when two consecutive
+/// messages share the same role. Anthropic's Messages API requires user and
+/// assistant roles to alternate; collapsing repeated roles keeps the request
+/// valid without losing content.
+fn merge_anthropic_content(existing: &mut serde_json::Value, incoming: &serde_json::Value) {
+    let existing_content = existing.get_mut("content").unwrap();
+    let incoming_content = incoming.get("content").unwrap();
+    match (existing_content, incoming_content) {
+        (serde_json::Value::String(a), serde_json::Value::String(b)) => {
+            a.push_str("\n\n");
+            a.push_str(b);
+        }
+        (serde_json::Value::Array(a), serde_json::Value::Array(b)) => {
+            a.extend(b.clone());
+        }
+        (serde_json::Value::String(a), serde_json::Value::Array(_)) => {
+            let mut arr = vec![json!({"type": "text", "text": a.clone()})];
+            if let serde_json::Value::Array(b) = incoming_content {
+                arr.extend(b.clone());
+            }
+            *existing.get_mut("content").unwrap() = json!(arr);
+        }
+        (serde_json::Value::Array(_), serde_json::Value::String(b)) => {
+            existing
+                .get_mut("content")
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type": "text", "text": b.as_str()}));
+        }
+        _ => {}
+    }
+}
+
 impl Processor {
     pub(super) async fn call_api(
         &self,
@@ -267,6 +301,12 @@ impl Processor {
             body_obj.insert("tool_choice".to_string(), json!("auto"));
         } else {
             body_obj.insert("stream".to_string(), json!(true));
+        }
+        if let Some(t) = self.temperature {
+            body_obj.insert("temperature".to_string(), json!(t));
+        }
+        if let Some(p) = self.top_p {
+            body_obj.insert("top_p".to_string(), json!(p));
         }
         if let Some(ref effort) = self.reasoning_effort {
             body_obj.insert("reasoning_effort".to_string(), json!(effort));
@@ -676,19 +716,20 @@ impl Processor {
         F: FnMut(&str),
     {
         let mut system_prompt = None;
-        let mut anthropic_messages = Vec::new();
+        let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
         for msg in messages {
-            match msg.role.as_str() {
+            let role = msg.role.as_str();
+            match role {
                 "system" => {
                     if let MessageContent::Text(text) = msg.content {
                         system_prompt = Some(text);
                     }
                 }
-                "user" => {
+                "user" | "assistant" => {
                     let anthropic_msg = match msg.content {
                         MessageContent::Text(text) => {
-                            json!({"role": "user", "content": text})
+                            json!({"role": role, "content": text})
                         }
                         MessageContent::Parts(parts) => {
                             let content: Vec<serde_json::Value> = parts
@@ -709,9 +750,15 @@ impl Processor {
                                     _ => json!({"type": "text", "text": ""}),
                                 })
                                 .collect();
-                            json!({"role": "user", "content": content})
+                            json!({"role": role, "content": content})
                         }
                     };
+                    if let Some(last) = anthropic_messages.last_mut() {
+                        if last.get("role").and_then(|r| r.as_str()) == Some(role) {
+                            merge_anthropic_content(last, &anthropic_msg);
+                            continue;
+                        }
+                    }
                     anthropic_messages.push(anthropic_msg);
                 }
                 _ => {}
@@ -719,25 +766,30 @@ impl Processor {
         }
 
         for (i, msg) in anthropic_messages.iter().enumerate() {
+            let role = msg
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("unknown");
             if let Some(content) = msg.get("content") {
                 if let Some(text) = content.as_str() {
                     info!(
-                        "[processor] [{}] anthropic message[{}] role=user text_len={} chars",
+                        "[processor] [{}] anthropic message[{}] role={} text_len={} chars",
                         label,
                         i,
+                        role,
                         text.len()
                     );
                 } else if let Some(arr) = content.as_array() {
                     for (j, block) in arr.iter().enumerate() {
                         if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                             info!(
-                                "[processor] [{}] anthropic message[{}] part[{}] type=text text_len={} chars",
-                                label, i, j, text.len()
+                                "[processor] [{}] anthropic message[{}] part[{}] role={} type=text text_len={} chars",
+                                label, i, j, role, text.len()
                             );
                         } else if block.get("image").is_some() || block.get("source").is_some() {
                             info!(
-                                "[processor] [{}] anthropic message[{}] part[{}] type=image image=<present>",
-                                label, i, j
+                                "[processor] [{}] anthropic message[{}] part[{}] role={} type=image image=<present>",
+                                label, i, j, role
                             );
                         }
                     }
@@ -751,19 +803,20 @@ impl Processor {
             "max_tokens": self.max_tokens,
             "stream": true,
         });
+        if let Some(t) = self.temperature {
+            body.as_object_mut()
+                .unwrap()
+                .insert("temperature".to_string(), json!(t));
+        }
+        if let Some(p) = self.top_p {
+            body.as_object_mut()
+                .unwrap()
+                .insert("top_p".to_string(), json!(p));
+        }
         if let Some(sp) = system_prompt {
             body.as_object_mut()
                 .unwrap()
                 .insert("system".to_string(), json!(sp));
-        }
-        if let Some(bt) = self.thinking_budget_tokens {
-            body.as_object_mut().unwrap().insert(
-                "thinking".to_string(),
-                json!({
-                    "type": "enabled",
-                    "budget_tokens": (bt as usize).min(self.max_tokens.saturating_sub(1) as usize).min(32000)
-                }),
-            );
         }
 
         if let Some(ref oauth_token) = self.anthropic_oauth_token {

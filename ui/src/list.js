@@ -159,7 +159,7 @@ export const list = {
         </div>
         <div class="field">
           <label>摘要</label>
-          <textarea id="f-abstract-${this.escape(p.id)}">${this.escape(p.abstract)}</textarea>
+          <textarea id="f-abstract-${this.escape(p.id)}">${this.escape(p.abstract_zh)}</textarea>
         </div>
         <div class="field">
           <label>总结</label>
@@ -199,8 +199,8 @@ export const list = {
       </div>
       <div class="section" style="position:relative;">
         <div class="section-label">摘要</div>
-        <div style="position:absolute;top:0;right:0;font-size:12px;color:var(--text3);white-space:nowrap;">${this.renderTags(p)}</div>
-        <div class="section-body dark" style="padding-top:2px;">${this.renderMarkdownLite(this.escapeHtml(p.abstract || ''))}</div>
+        <div style="position:absolute;top:0;right:0;font-size:12px;color:var(--text3);display:flex;max-width:${isMobile ? '75%' : '85%'}">（<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">${this.renderTags(p)}</span>）</div>
+        <div class="section-body dark" style="padding-top:2px;">${this.renderMarkdownLite(this.escapeHtml(p.abstract_zh || ''))}</div>
       </div>
       ${summarySection}
       <div class="actions">
@@ -329,7 +329,6 @@ export const list = {
   },
 
   async goPage(p) {
-    this.haptic('light');
     this.page = p;
     this.pushURL();
     await this.load();
@@ -397,7 +396,6 @@ export const list = {
   },
 
   toggleSearch() {
-    this.haptic('light');
     const panel = document.getElementById('searchPanel');
     const isOpen = panel.classList.contains('open');
     if (isOpen) {

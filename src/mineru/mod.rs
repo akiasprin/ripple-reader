@@ -20,11 +20,11 @@ pub use types::{
     LayoutLine, LayoutPage, LayoutParaBlock, LayoutSpan, ManualFigure, ManualFigures, RawBlock,
 };
 // LayoutParaBlock methods are in layout.rs (auto-imported when type is used)
-pub use client::MinerUClient;
+pub use client::{synthesize_equation_figure_for_orphan, MinerUClient};
 pub use layout::{collect_block_lines, extract_block_text};
 pub use postprocess::{
     detect_column_boundaries, merge_into, post_process_blocks, propagate_captions,
-    rebind_orphan_captions, should_merge, should_merge_geometry_only,
+    rebind_orphan_captions, should_merge, should_merge_geometry_only, swap_mismatched_captions,
 };
 pub use utils::{
     bbox_contains, encode_base36_2, extract_caption_number, group_caption_lines, line_text,

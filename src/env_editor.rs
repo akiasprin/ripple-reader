@@ -16,6 +16,14 @@ pub struct ProviderConfig {
     pub max_tokens: String,
     pub reasoning_effort: String,
     pub user_agent: String,
+    /// Sampling temperature. Empty string = "unset" — no `temperature` key is
+    /// sent on the wire, the upstream server default applies. Persisted as
+    /// `_TEMPERATURE=` (empty) when the user clears the field, to actively
+    /// drop the env key, mirroring `reasoning_effort`'s contract.
+    pub temperature: String,
+    /// Nucleus-sampling cutoff. Same empty-string-means-unset contract as
+    /// `temperature`. Persisted as `_TOP_P=`.
+    pub top_p: String,
     pub is_digest: String,
     pub is_comment: String,
     pub enabled: String,
@@ -55,6 +63,11 @@ impl ProviderConfig {
             format!("{}_REASONING_EFFORT", prefix),
             self.reasoning_effort.clone(),
         );
+        // Always write temperature / top_p (even if empty) for the same reason
+        // as reasoning_effort: empty value = "unset" means we want to actively
+        // clear any previously persisted value in .env.
+        map.insert(format!("{}_TEMPERATURE", prefix), self.temperature.clone());
+        map.insert(format!("{}_TOP_P", prefix), self.top_p.clone());
         if !self.user_agent.is_empty() {
             map.insert(format!("{}_USER_AGENT", prefix), self.user_agent.clone());
         }
@@ -201,6 +214,8 @@ pub fn read_providers(env_path: &str) -> Result<Vec<(usize, ProviderConfig)>> {
                     model: get("MODEL"),
                     max_tokens: get("MAX_TOKENS"),
                     reasoning_effort: get("REASONING_EFFORT"),
+                    temperature: get("TEMPERATURE"),
+                    top_p: get("TOP_P"),
                     user_agent: get("USER_AGENT"),
                     is_digest: get("IS_DIGEST"),
                     is_comment: get("IS_COMMENT"),
@@ -216,6 +231,10 @@ pub fn read_providers(env_path: &str) -> Result<Vec<(usize, ProviderConfig)>> {
 /// Add or update a provider.
 /// For new providers, finds the first empty slot (1-10).
 /// For updates, uses the provided index.
+///
+/// On update, old numbered keys (e.g. `API_KEY_3`) that are no longer in the
+/// new config are removed from `.env` — `write_env_file` only upserts, so
+/// stale higher-numbered keys would otherwise persist and reappear on read.
 pub fn write_provider(
     env_path: &str,
     index: Option<usize>,
@@ -240,17 +259,50 @@ pub fn write_provider(
         }
     };
 
+    // Remove all existing keys for this provider index before writing new ones,
+    // so stale numbered keys (API_KEY_N) don't persist after deletion.
+    remove_provider_keys(env_path, idx)?;
+
     let updates = provider.to_env_map(idx);
     write_env_file(env_path, &updates)?;
     Ok(idx)
 }
 
-/// Delete a provider (clear all its fields).
-pub fn delete_provider(env_path: &str, index: usize) -> Result<()> {
+/// Remove specified keys from `.env` file entirely.
+/// Preserves original comments, blank lines, and order of remaining keys.
+pub fn remove_env_keys(path: &str, keys_to_remove: &[String]) -> Result<()> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read .env file: {}", path))?;
+    let remove_set: std::collections::HashSet<&str> =
+        keys_to_remove.iter().map(|s| s.as_str()).collect();
+
+    let mut new_lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            new_lines.push(line.to_string());
+            continue;
+        }
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim();
+            if remove_set.contains(key) {
+                continue; // skip this key entirely
+            }
+        }
+        new_lines.push(line.to_string());
+    }
+
+    let output = new_lines.join("\n") + "\n";
+    std::fs::write(path, output).with_context(|| format!("Failed to write .env file: {}", path))?;
+    Ok(())
+}
+
+/// Collect all `.env` keys belonging to a provider index.
+/// Returns only keys that actually exist in the file.
+fn provider_env_keys(env_path: &str, index: usize) -> Vec<String> {
     let env = read_env_file(env_path).unwrap_or_default();
     let prefix = format!("INSIGHT_PROVIDER_{}", index);
-    let mut updates = HashMap::new();
-    let mut suffixes: Vec<String> = [
+    let mut keys: Vec<String> = [
         "NAME",
         "TYPE",
         "BASE_URL",
@@ -258,25 +310,34 @@ pub fn delete_provider(env_path: &str, index: usize) -> Result<()> {
         "MODEL",
         "MAX_TOKENS",
         "REASONING_EFFORT",
+        "TEMPERATURE",
+        "TOP_P",
         "USER_AGENT",
         "IS_DIGEST",
         "IS_COMMENT",
         "ENABLED",
     ]
     .iter()
-    .map(|s| s.to_string())
+    .map(|s| format!("{}_{}", prefix, s))
     .collect();
     for ki in 1..=100 {
-        suffixes.push(format!("API_KEY_{}", ki));
+        keys.push(format!("{}_API_KEY_{}", prefix, ki));
     }
-    for suffix in suffixes {
-        let key = format!("{}_{}", prefix, suffix);
-        if env.contains_key(&key) {
-            updates.insert(key, String::new());
-        }
+    keys.into_iter().filter(|k| env.contains_key(k)).collect()
+}
+
+/// Remove all keys for a provider index from `.env`.
+fn remove_provider_keys(env_path: &str, index: usize) -> Result<()> {
+    let keys = provider_env_keys(env_path, index);
+    if !keys.is_empty() {
+        remove_env_keys(env_path, &keys)?;
     }
-    write_env_file(env_path, &updates)?;
     Ok(())
+}
+
+/// Delete a provider (remove all its keys from `.env`).
+pub fn delete_provider(env_path: &str, index: usize) -> Result<()> {
+    remove_provider_keys(env_path, index)
 }
 
 /// Reorder providers.
@@ -308,9 +369,9 @@ pub fn reorder_providers(env_path: &str, order: &[usize]) -> Result<()> {
         }
     }
 
-    // Step 1: clear all existing provider keys
+    // Step 1: remove all existing provider keys
     let env = read_env_file(env_path).unwrap_or_default();
-    let mut clear_updates = HashMap::new();
+    let mut keys_to_remove: Vec<String> = Vec::new();
     for i in 1..=10 {
         let prefix = format!("INSIGHT_PROVIDER_{}", i);
         let suffixes = [
@@ -321,6 +382,8 @@ pub fn reorder_providers(env_path: &str, order: &[usize]) -> Result<()> {
             "MODEL",
             "MAX_TOKENS",
             "REASONING_EFFORT",
+            "TEMPERATURE",
+            "TOP_P",
             "USER_AGENT",
             "IS_DIGEST",
             "IS_COMMENT",
@@ -329,18 +392,18 @@ pub fn reorder_providers(env_path: &str, order: &[usize]) -> Result<()> {
         for suffix in &suffixes {
             let key = format!("{}_{}", prefix, suffix);
             if env.contains_key(&key) {
-                clear_updates.insert(key, String::new());
+                keys_to_remove.push(key);
             }
         }
         for ki in 1..=100 {
             let key = format!("{}_API_KEY_{}", prefix, ki);
             if env.contains_key(&key) {
-                clear_updates.insert(key, String::new());
+                keys_to_remove.push(key);
             }
         }
     }
-    if !clear_updates.is_empty() {
-        write_env_file(env_path, &clear_updates)?;
+    if !keys_to_remove.is_empty() {
+        remove_env_keys(env_path, &keys_to_remove)?;
     }
 
     // Step 2: write providers in new order

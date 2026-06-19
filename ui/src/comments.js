@@ -2,9 +2,8 @@
 // Each module exports a slice of the global `app` object; main.js merges them.
 export const comments = {
   buildHeadingPrompt() {
-    return '第一步，深度理解全文，然后在<thinking>中寻找一个与论文做类比最贴切的[场景]（比如：后厨之协作、吃火锅之节奏、行程规划之策略），要输出理由和思路。第二步，你要扮演[场景]中的主角，你在该领域已有三十年的经验。第三步，你用三十年的心法做沉浸式类比，套用文中的方法和公式，以痛点和解决方法作为主线逻辑。要求使用针对画面与感官的夸张+胡扯手法，结构化输出但不要标题，段落间使用`<hr>`。不要输出额外说明或元信息。以「老弟，你坐下，听我讲。」开始续写';
+    return 'Step1:在脑中思考要提取的高价值内容[梳理项]，包括但不限于：关键洞察、反直觉发现、创造性思路或方法、核心结论、重要定义或定理等等。如果原文同时包含多种类型，请按类型分别梳理，不要把洞察和反直觉发现混在一起讨论。Step2:对每个[梳理项]进行两项输出：1.「详讲」:极度详细的、包含原文公式的讲解；讲解完成后，整段输出自我评估（不要放在详讲的分点里），判断该讲解是否全面、有无重要遗漏。2.「类比」:使用最贴切的类比场景对全面详讲内容进行解释，指出该类比本身的局限，明确说明在哪些条件/假设下这个类比不再成立或可能误导理解。Step3:严格按格式输出：开头先写一句友好开场，说明梳理项总数。然后每个[梳理项]独立成块，依次包含小标题、①「详讲」、②「类比」三个部分；小标题固定格式「梳理项 N：类型：内容」，例如「梳理项 1：重要定义与定理：缩放定律」；每部分内部用编号条目分点呈现，避免连续大段文字；「类比」固定分为三点：场景设定、逻辑映射、局限性说明；「详讲」和「类比」中的核心概念、关键结论、重要条件等重点内容使用 Markdown 加粗（**文本**）突出显示';
   },
-
   onAddCommentClick() {
     this.hideSelectionTooltip();
     window.getSelection().removeAllRanges();
@@ -100,12 +99,21 @@ export const comments = {
   },
 
   async loadComments(paperId, autoOpen = false) {
-    // If a reply bubble is already open the user is reading a specific reply.
-    // Polling refreshes must leave it alone — the auto-open logic below only
-    // targets pending/empty replies that the user would never open manually.
-    const bubbleOpen = this._openReplyBubbleId != null;
-    const hadBubble = !bubbleOpen && !!document.getElementById('replyBubble');
-    if (hadBubble) this.hideReplyBubble();
+    // Close and reopen bubble only when navigating to a different paper.
+    // Same-paper polls must leave the open bubble alone.
+    let reopenBubble = false;
+    const bubbleFromOtherPaper = this._openReplyBubbleId != null
+      && this._openReplyBubblePaperId !== paperId;
+    if (bubbleFromOtherPaper) {
+      this.hideReplyBubble();
+      reopenBubble = true;
+    }
+    const hadBubble = !!document.getElementById('replyBubble')
+      && !this._openReplyBubbleId;
+    if (hadBubble) {
+      this.hideReplyBubble();
+      reopenBubble = true;
+    }
 
     let loaded = false;
     try {
@@ -136,8 +144,7 @@ export const comments = {
       }
     }
     // If bubble was open on previous paper, auto-open first AI reply on new paper
-    // (old bubble may still be in DOM during shrink animation, so check hadBubble not DOM)
-    if (hadBubble) {
+    if (reopenBubble) {
       const firstAi = this.comments.find(c => c.is_ai && c.ai_reply && c.ai_status !== 'pending');
       if (firstAi) {
         setTimeout(() => this.showReplyModal(firstAi.id, null), 500);
@@ -155,21 +162,31 @@ export const comments = {
 
     // Skip DOM rebuild if nothing meaningful changed — prevents text selection
     // from being destroyed by polling-driven re-renders.
+    // Note: activeCommentId is excluded from fingerprint; the active class is
+    // toggled via direct DOM manipulation to avoid full re-renders on click.
     const fp = this.comments.map(c => {
       // During pending, ai_reply grows on backend but isn't rendered (only
       // a spinner is shown), so ignore ai_reply length changes to avoid
       // re-rendering the entire list every 3 seconds during polling.
       const aiReplyLen = c.ai_status === 'pending' ? 'P' : (c.ai_reply ? c.ai_reply.length : 0);
       return c.id + ':' + c.ai_status + ':' + aiReplyLen;
-    }).join(',') + '|auth:' + !!this.authenticated + '|active:' + (this.activeCommentId || '');
-    if (fp === this._commentsFingerprint && this.comments.length > 0) return;
+    }).join(',') + '|auth:' + !!this.authenticated;
+    if (fp === this._commentsFingerprint && this.comments.length > 0) {
+      this._updateActiveCommentClass();
+      return;
+    }
     this._commentsFingerprint = fp;
 
     if (countEl) countEl.textContent = this.comments.length;
     if (toggleCount) toggleCount.textContent = this.comments.length;
     if (this.comments.length === 0) {
       list.innerHTML = '<div class="empty-comments">暂无批注<br>选中正文添加批注</div>';
+      if (formArea && !formArea.querySelector('textarea')) formArea.innerHTML = '';
+      this._commentFingerprints = null;
     } else {
+      // Save active form state before any DOM manipulation
+      const savedForms = this._saveActiveForms();
+
       const lastId = this.lastAddedCommentId;
       const childrenMap = new Map();
       for (const c of this.comments) {
@@ -178,101 +195,39 @@ export const comments = {
           childrenMap.get(c.parent_id).push(c);
         }
       }
-      const renderCard = (c) => {
-        const isLast = lastId === c.id;
-        const isAi = c.is_ai;
-        const aiStatus = c.ai_status || '';
-        let bodyHtml = '';
-        let actionHtml = '';
-
-        if (isAi) {
-          bodyHtml = `<div class="comment-card-body ai-comment-body">${this.escape(c.comment)}</div>`;
-          if (aiStatus === 'pending') {
-            bodyHtml += `<div class="ai-comment-status"><span class="ai-spinner"></span>处理中...</div>`;
-          } else if (aiStatus === 'completed' || aiStatus === 'applied' || aiStatus === 'rejected') {
-            if (c.ai_reply) {
-              const MAX_LEN = 150;
-              const usedTool = !!(c.ai_old_text && c.ai_new_text);
-              const needsTruncate = c.ai_reply.length > MAX_LEN;
-              if (!usedTool) {
-                // No tool used: always show "view full reply" button
-                const short = this.escape(this.truncateText(c.ai_reply, MAX_LEN));
-                bodyHtml += `<div class="ai-comment-reply"><div class="ai-reply-short">${short}</div><div class="ai-reply-actions"><button class="ai-reply-expand-btn" onclick="event.stopPropagation();app.showReplyModal(${c.id}, event)">查看完整回复</button><button class="ai-reply-regenerate-btn" onclick="event.stopPropagation();app.regenerateAiComment(${c.id}, event)">↻</button></div></div>`;
-              } else if (needsTruncate) {
-                const isMd = this.isMarkdown(c.ai_reply);
-                const short = this.escape(this.truncateText(c.ai_reply, MAX_LEN));
-                if (isMd) {
-                  bodyHtml += `<div class="ai-comment-reply"><div class="ai-reply-short">${short}</div><div class="ai-reply-actions"><button class="ai-reply-expand-btn" onclick="event.stopPropagation();app.showReplyModal(${c.id}, event)">查看完整回复</button><button class="ai-reply-regenerate-btn" onclick="event.stopPropagation();app.regenerateAiComment(${c.id}, event)">↻</button></div></div>`;
-                } else {
-                  bodyHtml += `<div class="ai-comment-reply"><div class="ai-reply-short" id="aiReplyShort${c.id}">${short}</div><div class="ai-reply-full" id="aiReplyFull${c.id}" style="display:none">${this.escape(c.ai_reply)}</div><div class="ai-reply-actions"><button class="ai-reply-expand-btn" id="aiReplyToggle${c.id}" onclick="event.stopPropagation();app.toggleAiReply(${c.id})">展开</button><button class="ai-reply-regenerate-btn" onclick="event.stopPropagation();app.regenerateAiComment(${c.id}, event)">↻</button></div></div>`;
-                }
-              } else {
-                bodyHtml += `<div class="ai-comment-reply">${this.escape(c.ai_reply)}<div class="ai-reply-actions"><button class="ai-reply-regenerate-btn" onclick="event.stopPropagation();app.regenerateAiComment(${c.id}, event)">↻</button></div></div>`;
-              }
-            }
-            if (aiStatus === 'completed' && c.ai_old_text && c.ai_new_text) {
-              actionHtml = `<div class="ai-comment-actions">
-                <button class="btn-primary" onclick="event.stopPropagation();app.applyAiComment(${c.id})">接受</button>
-                <button class="btn-secondary" onclick="event.stopPropagation();app.rejectAiComment(${c.id})">取消</button>
-              </div>`;
-            } else if (aiStatus === 'applied') {
-              actionHtml = `<div class="ai-comment-status-tag applied">已接受</div>`;
-            } else if (aiStatus === 'rejected') {
-              actionHtml = `<div class="ai-comment-status-tag rejected">已拒绝</div>`;
-            }
-          } else if (aiStatus === 'failed') {
-            bodyHtml += `<div class="ai-comment-status error">AI 处理失败</div>`;
-          }
-        } else {
-          bodyHtml = `<div class="comment-card-body">${this.escape(c.comment)}</div>`;
-        }
-
-        const replyBtn = this.authenticated
-          ? `<button class="reply-btn" onclick="event.stopPropagation();app.showReplyForm(${c.id})">回复</button>`
-          : '';
-
-        let html = `
-        <div class="comment-card ${isAi ? 'ai-comment' : ''} ${this.activeCommentId === c.id ? 'active' : ''}${isLast ? ' anim-enter' : ''}" data-comment-id="${c.id}" onclick="app.onCommentCardClick(${c.id})"
-          onmouseenter="app.onCommentCardHover(${c.id})" onmouseleave="app.onCommentCardLeave()"
-        >
-          ${c.parent_id ? '' : (this.isImageQuote(c.quote) ? `<div class="comment-card-image"><img src="${this.escape(c.quote)}" loading="lazy"></div>` : `<div class="comment-card-quote">${this.escape(c.quote)}</div>`)}
-          ${bodyHtml}
-          ${actionHtml}
-          <div class="comment-card-meta">
-            <span>${this.formatShortDate(c.created_at)}</span>
-            <div class="comment-card-meta-actions">
-              ${replyBtn}
-              ${this.authenticated ? `<button class="delete-btn" onclick="event.stopPropagation();app.deleteComment(${c.id})">删除</button>` : ''}
-            </div>
-          </div>
-          <div class="reply-form-area" id="replyFormArea${c.id}"></div>
-        `;
-
-        const children = childrenMap.get(c.id);
-        if (children) {
-          html += '<div class="comment-replies">';
-          for (const child of children) {
-            html += renderCard(child);
-          }
-          html += '</div>';
-        }
-        html += '</div>';
-        return html;
-      };
 
       const roots = this.comments.filter(c => !c.parent_id);
-      list.innerHTML = roots.map(c => renderCard(c)).join('');
-      if (lastId !== null) {
-        setTimeout(() => { this.lastAddedCommentId = null; }, 500);
+
+      // Compute per-group fingerprints for incremental updates
+      const newGroupFps = new Map();
+      for (const r of roots) {
+        newGroupFps.set(r.id, this._computeGroupFingerprint(r, childrenMap));
       }
+
+      // Incremental update when possible, full rebuild otherwise
+      if (this._commentFingerprints && this._commentFingerprints.size > 0 && list.querySelector('.comment-card')) {
+        this._incrementalUpdateComments(list, roots, childrenMap, newGroupFps, lastId);
+      } else {
+        list.innerHTML = roots.map(c => this._renderCommentCard(c, childrenMap, lastId)).join('');
+        if (lastId !== null) {
+          setTimeout(() => { this.lastAddedCommentId = null; }, 500);
+        }
+      }
+
+      this._commentFingerprints = newGroupFps;
+
+      // Only clear form area if user is NOT actively typing
+      if (formArea && !formArea.querySelector('textarea')) {
+        formArea.innerHTML = '';
+      }
+
+      // Restore any forms that were active before the DOM update
+      this._restoreActiveForms(savedForms);
     }
-    // Clear any pending form
-    if (formArea) formArea.innerHTML = '';
     // Update panel/toggle visibility based on current state
     const panel = document.getElementById('insightCommentsPanel');
     const toggle = document.getElementById('commentsToggleBtn');
     if (this.comments.length === 0) {
-      // No annotations: never surface the toggle button.
       if (panel) panel.classList.remove('open');
       if (toggle) toggle.classList.remove('show');
     } else if (panel) {
@@ -280,19 +235,51 @@ export const comments = {
         panel.classList.add('open');
         if (toggle) toggle.classList.remove('show');
       } else {
-        // Show toggle button when panel is collapsed
         panel.classList.remove('open');
         if (toggle) toggle.classList.add('show');
       }
     }
+    // After DOM update, check which expand buttons are actually needed
+    // (CSS clamp may not overflow for short text).
+    requestAnimationFrame(() => {
+      this._revealExpandButtons();
+    });
   },
 
   showReplyModal(id, event) {
     const comment = this.comments.find(c => c.id === id);
-    if (!comment || !comment.ai_reply) return;
-    // Track which reply is open so polling refreshes don't destroy it
-    this._openReplyBubbleId = id;
+    // Get the full text: AI replies use ai_reply, regular comments use comment
+    const fullText = comment?.ai_reply || comment?.comment;
+    if (!comment || !fullText) return;
+
+    // If the same reply is already open in immersive mode, minimize it
+    // instead of rebuilding — prevents Space/Enter re-trigger race.
+    if (this._openReplyBubbleId === id) {
+      const existing = document.getElementById('replyBubble');
+      if (existing && existing.classList.contains('immersive')) {
+        const btn = event?.target;
+        this.exitImmersiveMode();
+        if (btn) btn.blur();
+        return;
+      }
+    }
+
+    // Close any existing bubble first (this also clears _openReplyBubbleId)
     this.hideReplyBubble();
+    // Clear pending cleanup timer and force-remove residual DOM so the
+    // old bubble cannot collide with the new one during cleanup timeout.
+    if (this._replyBubbleCleanupTimer) {
+      clearTimeout(this._replyBubbleCleanupTimer);
+      this._replyBubbleCleanupTimer = null;
+    }
+    const residualBubble = document.getElementById('replyBubble');
+    if (residualBubble) residualBubble.remove();
+    const residualOverlay = document.getElementById('replyBubbleOverlay');
+    if (residualOverlay) residualOverlay.remove();
+    // Track which reply is open so polling refreshes don't destroy it.
+    // Must be set AFTER hideReplyBubble() which sets _openReplyBubbleId = null.
+    this._openReplyBubbleId = id;
+    this._openReplyBubblePaperId = this.insightPageId;
 
     const bubble = document.createElement('div');
     bubble.id = 'replyBubble';
@@ -307,16 +294,20 @@ export const comments = {
         </div>
       </div>
       <div class="reply-bubble-inner"></div>
+      <div class="reply-bubble-resize-handle"></div>
     `;
     document.body.appendChild(bubble);
 
     const inner = bubble.querySelector('.reply-bubble-inner');
-    inner.innerHTML = this.renderMarkdown(this.escapeHtml(comment.ai_reply));
+    inner.innerHTML = this.renderMarkdown(this.escapeHtml(fullText));
 
     // Show comment text in drag handle (visible in immersive mode)
     const handleText = bubble.querySelector('.reply-bubble-handle-text');
-    if (handleText && comment.comment) {
-      handleText.textContent = comment.comment;
+    if (handleText) {
+      // For AI comments, show the user's original comment; for regular
+      // comments, show the quote or first few words.
+      const handleSrc = comment.comment || comment.quote || '';
+      if (handleSrc) handleText.textContent = handleSrc;
     }
     if (typeof Prism !== 'undefined') {
       inner.querySelectorAll('pre code[class^="language-"]').forEach(block => {
@@ -389,20 +380,28 @@ export const comments = {
       this._setupBubbleDrag(bubble, dragHandle);
     }
 
-    this._hideReplyBubbleHandler = (e) => {
-      if (!bubble.contains(e.target) && e.target !== btn) {
-        e.stopPropagation();
-        this.hideReplyBubble();
-      }
-    };
-    const isRestore = !event || !event.target;
+    // Resize handler (immersive only)
+    const resizeHandle = bubble.querySelector('.reply-bubble-resize-handle');
+    if (resizeHandle) {
+      this._setupBubbleResize(bubble, resizeHandle);
+    }
+
+    // Use a single stable handler (not a per-bubble closure) so double-clicks
+    // cannot leave zombie listeners behind. The handler checks the live DOM.
+    if (!this._replyBubbleClickHandler) {
+      this._replyBubbleClickHandler = (e) => {
+        const b = document.getElementById('replyBubble');
+        if (!b || !this._openReplyBubbleId) return;
+        if (!b.contains(e.target) && e.target !== this._replyBubbleOpenBtn) {
+          this.hideReplyBubble();
+        }
+      };
+    }
+    this._replyBubbleOpenBtn = btn;
     requestAnimationFrame(() => {
-      document.addEventListener('click', this._hideReplyBubbleHandler);
-      // Auto-enter immersive: mobile, long content, or restoring from refresh
-      const isMobile = !this.isDesktopViewport();
-      if (isRestore || isMobile || (comment.ai_reply && comment.ai_reply.length > 400)) {
-        this.enterImmersiveMode();
-      }
+      document.addEventListener('click', this._replyBubbleClickHandler);
+      // Always enter immersive — user explicitly requested full content view
+      this.enterImmersiveMode();
     });
 
     // Persist bubble state in URL so it survives refresh
@@ -415,6 +414,9 @@ export const comments = {
       }
     };
     window.addEventListener('popstate', this._replyBubblePopHandler);
+    // Blur source button so keyboard (Space/Enter) targets bubble controls,
+    // not the external button that opened this bubble.
+    if (btn) btn.blur();
   },
 
   enterImmersiveMode() {
@@ -477,11 +479,15 @@ export const comments = {
 
     // Apply immersive class and center smoothly via CSS transitions.
     bubble.classList.add('immersive');
+    // Clear any prior resize inline styles so CSS class values take effect
     bubble.style.maxWidth = '';
+    bubble.style.width = '';
+    bubble.style.maxHeight = '';
+    bubble.style.height = '';
     const vw = window.innerWidth;
     const isMobile = vw <= 640;
-    // Match CSS: .reply-bubble.immersive { width: min(780px, 90vw) }
-    const targetWidth = isMobile ? vw * 0.95 : Math.min(780, vw * 0.9);
+    // Match CSS: .reply-bubble.immersive { width: min(880px, 90vw) }
+    const targetWidth = isMobile ? vw * 0.95 : Math.min(880, vw * 0.9);
     const bubbleHeight = isMobile ? window.innerHeight * 0.90 : Math.min(window.innerHeight * 0.75, window.innerHeight - 40);
     bubble.style.left = Math.max(10, (vw - targetWidth) / 2) + 'px';
     bubble.style.top = Math.max(10, (window.innerHeight - bubbleHeight) / 2) + 'px';
@@ -544,6 +550,7 @@ export const comments = {
     let startY = 0;
     let translateX = 0;
     let translateY = 0;
+    let savedTransition = '';
 
     const getClientPos = (e) => {
       const t = e.touches && e.touches[0] ? e.touches[0] : e;
@@ -561,6 +568,8 @@ export const comments = {
       const p = getClientPos(e);
       startX = p.x - translateX;
       startY = p.y - translateY;
+      savedTransition = bubble.style.transition;
+      bubble.style.transition = 'none';
       bubble.classList.add('dragging');
       e.preventDefault();
     };
@@ -588,6 +597,7 @@ export const comments = {
     const onEnd = () => {
       if (!isDragging) return;
       isDragging = false;
+      bubble.style.transition = savedTransition;
       bubble.classList.remove('dragging');
     };
 
@@ -609,16 +619,87 @@ export const comments = {
     };
   },
 
+  _setupBubbleResize(bubble, handle) {
+    let isResizing = false;
+    let startX = 0;
+    let startY = 0;
+    let startWidth = 0;
+    let startHeight = 0;
+    let savedTransition = '';
+
+    const getClientPos = (e) => {
+      const t = e.touches && e.touches[0] ? e.touches[0] : e;
+      return { x: t.clientX, y: t.clientY };
+    };
+
+    const onStart = (e) => {
+      if (e.type === 'mousedown' && e.button !== 0) return;
+      if (!bubble.classList.contains('immersive')) return;
+      isResizing = true;
+      const p = getClientPos(e);
+      const rect = bubble.getBoundingClientRect();
+      startX = p.x;
+      startY = p.y;
+      startWidth = rect.width;
+      startHeight = rect.height;
+      // Kill CSS transitions during resize so the frame follows the cursor instantly
+      savedTransition = bubble.style.transition;
+      bubble.style.transition = 'none';
+      bubble.classList.add('resizing');
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onMove = (e) => {
+      if (!isResizing) return;
+      const p = getClientPos(e);
+      const dw = p.x - startX;
+      const dh = p.y - startY;
+      const newW = Math.max(320, Math.min(window.innerWidth - 20, startWidth + dw));
+      const newH = Math.max(200, Math.min(window.innerHeight - 20, startHeight + dh));
+      bubble.style.width = newW + 'px';
+      bubble.style.maxWidth = (window.innerWidth - 20) + 'px';
+      bubble.style.maxHeight = newH + 'px';
+      bubble.style.height = newH + 'px';
+    };
+
+    const onEnd = () => {
+      if (!isResizing) return;
+      isResizing = false;
+      // Restore CSS transitions so expand/collapse animates normally again
+      bubble.style.transition = savedTransition;
+      bubble.classList.remove('resizing');
+    };
+
+    handle.addEventListener('mousedown', onStart);
+    handle.addEventListener('touchstart', onStart, { passive: false });
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('mouseup', onEnd);
+    document.addEventListener('touchend', onEnd);
+
+    this._bubbleResizeCleanup = () => {
+      handle.removeEventListener('mousedown', onStart);
+      handle.removeEventListener('touchstart', onStart);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('mouseup', onEnd);
+      document.removeEventListener('touchend', onEnd);
+    };
+  },
+
   hideReplyBubble() {
     // Allow loadComments to auto-open a reply again after the bubble is closed
     this._openReplyBubbleId = null;
+    this._openReplyBubblePaperId = null;
     const bubble = document.getElementById('replyBubble');
 
-    // Always remove click handler first to prevent double-trigger during animation
-    if (this._hideReplyBubbleHandler) {
-      document.removeEventListener('click', this._hideReplyBubbleHandler);
-      delete this._hideReplyBubbleHandler;
+    // Always remove click handler first to prevent double-trigger during animation.
+    // Handler is shared across bubbles — remove from listener but keep the reference.
+    if (this._replyBubbleClickHandler) {
+      document.removeEventListener('click', this._replyBubbleClickHandler);
     }
+    this._replyBubbleOpenBtn = null;
 
     // Clean up back-button handler
     if (this._replyBubblePopHandler) {
@@ -633,6 +714,7 @@ export const comments = {
     }
 
     if (bubble && bubble.classList.contains('immersive')) {
+      const closingBubble = bubble; // Guard against race: only clean up this element
       const btnRect = this._replyBubbleBtnRect;
       if (btnRect && this.isDesktopViewport()) {
         // Desktop: animate shrink back to the button position
@@ -668,20 +750,28 @@ export const comments = {
       // Cleanup — animate delay only when shrinking to button
       const cleanup = () => {
         const b = document.getElementById('replyBubble');
-        if (b) b.remove();
+        // Only remove if the DOM still holds the same bubble we closed.
+        // A new bubble may have been created during the 300ms timeout.
+        if (!b || b !== closingBubble) return;
+        b.remove();
         if (this._bubbleDragCleanup) {
           this._bubbleDragCleanup();
           delete this._bubbleDragCleanup;
         }
+        if (this._bubbleResizeCleanup) {
+          this._bubbleResizeCleanup();
+          delete this._bubbleResizeCleanup;
+        }
         delete this._replyBubbleOriginalRect;
         delete this._replyBubbleBtnRect;
+        delete this._replyBubbleCleanupTimer;
         this._updateThemeColorForBubble(false);
       };
       if (btnRect && this.isDesktopViewport()) {
-        setTimeout(cleanup, 300);
+        this._replyBubbleCleanupTimer = setTimeout(cleanup, 300);
       } else {
         // Mobile: wait for exitImmersiveMode transition to finish
-        setTimeout(cleanup, 300);
+        this._replyBubbleCleanupTimer = setTimeout(cleanup, 300);
       }
       return;
     }
@@ -695,6 +785,10 @@ export const comments = {
       this._bubbleDragCleanup();
       delete this._bubbleDragCleanup;
     }
+    if (this._bubbleResizeCleanup) {
+      this._bubbleResizeCleanup();
+      delete this._bubbleResizeCleanup;
+    }
     delete this._replyBubbleOriginalRect;
     delete this._replyBubbleBtnRect;
     this._updateThemeColorForBubble(false);
@@ -705,18 +799,22 @@ export const comments = {
   },
 
   toggleAiReply(id) {
+    // Delegate to the generic toggle (supports both old aiReply IDs and new commentExpand IDs)
+    this.toggleExpandReply(id);
+    // Also try legacy IDs for any remaining old-rendered cards
     const short = document.getElementById('aiReplyShort' + id);
     const full = document.getElementById('aiReplyFull' + id);
     const btn = document.getElementById('aiReplyToggle' + id);
-    if (!short || !full || !btn) return;
-    if (full.style.display === 'none') {
-      full.style.display = '';
-      short.style.display = 'none';
-      btn.textContent = '收起';
-    } else {
-      full.style.display = 'none';
-      short.style.display = '';
-      btn.textContent = '展开';
+    if (short && full && btn) {
+      if (full.style.display === 'none') {
+        full.style.display = '';
+        short.style.display = 'none';
+        btn.textContent = '收起';
+      } else {
+        full.style.display = 'none';
+        short.style.display = '';
+        btn.textContent = '展开';
+      }
     }
   },
 
@@ -869,11 +967,11 @@ export const comments = {
   },
 
   showMobileCommentEditor(mode) {
-    const editor = document.getElementById('mobileCommentEditor');
+    const overlay = document.getElementById('mobileCommentOverlay');
     const input = document.getElementById('mobileCommentEditorInput');
     const quote = document.getElementById('mobileCommentEditorQuote');
-    const title = editor ? editor.querySelector('.mobile-comment-editor-title') : null;
-    if (!editor || !input || !quote) return;
+    const title = overlay ? overlay.querySelector('.mobile-comment-editor-title') : null;
+    if (!overlay || !input || !quote) return;
 
     this._mobileEditorMode = mode;
 
@@ -896,66 +994,36 @@ export const comments = {
       input.placeholder = '输入批注内容...';
     }
 
-    editor.classList.add('show');
-    // Save scroll position before locking body (iOS jumps to top)
-    this._editorScrollY = window.scrollY;
-    document.body.style.overflow = 'hidden';
+    // Lock body scroll — same approach as insight dialog.
+    // On iOS Safari, position:fixed body combined with the soft keyboard
+    // causes coordinate-mapping bugs, so we only use overflow:hidden.
+    const scrollY = window.scrollY || document.documentElement.scrollTop || 0;
+    document.documentElement.style.overflow = 'hidden';
+    overlay._savedScrollY = scrollY;
 
-    // Focus and position cursor at end
+    overlay.classList.add('open');
+
+    // Focus after slide-in animation completes.
     setTimeout(() => {
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
-      // Adjust for keyboard using visualViewport
-      this._adjustEditorForKeyboard();
-    }, 100);
+    }, 350);
   },
 
   hideMobileCommentEditor() {
-    const editor = document.getElementById('mobileCommentEditor');
-    if (editor) {
-      editor.classList.remove('show');
-      editor.style.transform = '';
+    const overlay = document.getElementById('mobileCommentOverlay');
+    if (overlay) {
+      overlay.classList.remove('open');
     }
-    document.body.style.overflow = '';
-    // Restore scroll position after unlocking body
-    if (this._editorScrollY != null) {
-      window.scrollTo(0, this._editorScrollY);
-      this._editorScrollY = null;
-    }
+    // Unlock body scroll and restore position.
+    document.documentElement.style.overflow = '';
+    const scrollY = overlay?._savedScrollY || 0;
+    window.scrollTo(0, scrollY);
+    if (overlay) delete overlay._savedScrollY;
+
     document.dispatchEvent(new Event('app:hideMobileEditor'));
-    this._removeKeyboardHandler();
     this.hideSelectionTooltip();
     this.cancelCommentForm();
-  },
-
-  _adjustEditorForKeyboard() {
-    if (!window.visualViewport) return;
-    // Remove previous handlers first (safe even if never added)
-    if (this._kbHandler) {
-      window.visualViewport.removeEventListener('resize', this._kbHandler);
-      window.visualViewport.removeEventListener('scroll', this._kbHandler);
-    }
-    this._kbHandler = () => {
-      const vh = window.visualViewport.height;
-      const keyboardH = window.innerHeight - vh;
-      const editor = document.getElementById('mobileCommentEditor');
-      if (!editor) return;
-      if (keyboardH > 50) {
-        editor.style.transform = 'translateY(-' + keyboardH + 'px)';
-      } else {
-        editor.style.transform = '';
-      }
-    };
-    window.visualViewport.addEventListener('resize', this._kbHandler);
-    window.visualViewport.addEventListener('scroll', this._kbHandler);
-  },
-
-  _removeKeyboardHandler() {
-    if (this._kbHandler) {
-      window.visualViewport?.removeEventListener('resize', this._kbHandler);
-      window.visualViewport?.removeEventListener('scroll', this._kbHandler);
-      this._kbHandler = null;
-    }
   },
 
   async submitMobileComment() {
@@ -964,8 +1032,6 @@ export const comments = {
     if (!text) return;
     if (!this.pendingSelection && !this.pendingImage) return;
     if (!this.insightPageId) return;
-
-    this.haptic('success');
 
     if (text.startsWith('@AGENT')) {
       const instruction = text.slice(6).trim();
@@ -1028,7 +1094,6 @@ export const comments = {
   },
 
   async submitComment() {
-    this.haptic('success');
     if (!this.pendingSelection || !this.insightPageId) return;
     const ta = document.getElementById('commentInput');
     const text = ta ? ta.value.trim() : '';
@@ -1054,7 +1119,7 @@ export const comments = {
           body: JSON.stringify(body),
         });
         if (!res.ok) throw new Error('failed');
-        this.pendingSelection = null;
+        this.cancelCommentForm();
         await this.loadComments(this.insightPageId);
         this.showCommentsPanel();
         this.startAiCommentPoll();
@@ -1082,7 +1147,7 @@ export const comments = {
       if (!res.ok) throw new Error('failed');
       const newComment = await res.json();
       this.lastAddedCommentId = newComment.id;
-      this.pendingSelection = null;
+      this.cancelCommentForm();
       await this.loadComments(this.insightPageId);
       this.showToast('批注已添加', 'success');
     } catch (e) {
@@ -1114,7 +1179,7 @@ export const comments = {
       if (!res.ok) throw new Error('failed');
       const newComment = await res.json();
       this.lastAddedCommentId = newComment.id;
-      this.pendingImage = null;
+      this.cancelCommentForm();
       await this.loadComments(this.insightPageId);
       this.showToast('批注已添加', 'success');
     } catch (e) {
@@ -1182,21 +1247,43 @@ export const comments = {
   },
 
   startAiCommentPoll() {
-    if (this._aiPollTimer) return;
-    this._aiPollTimer = setInterval(async () => {
+    // Use recursive setTimeout instead of setInterval so callbacks never
+    // overlap. This prevents a slow/stale fetch from overwriting a newer
+    // result or from clearing the timer while another fetch is in flight.
+    if (this._aiPollTimer) {
+      clearTimeout(this._aiPollTimer);
+      this._aiPollTimer = null;
+    }
+    const poll = async () => {
       if (!this.insightPageId) {
-        clearInterval(this._aiPollTimer);
         this._aiPollTimer = null;
         return;
       }
+      // Remember whether we expected a pending reply before this fetch; if the
+      // fetch fails we can decide whether to keep polling.
+      const hadPending = this.comments.some(
+        (c) => c.is_ai && c.ai_status === 'pending'
+      );
       const loaded = await this.loadComments(this.insightPageId);
-      if (!loaded) return;
-      const hasPending = this.comments.some(c => c.is_ai && c.ai_status === 'pending');
-      if (!hasPending) {
-        clearInterval(this._aiPollTimer);
-        this._aiPollTimer = null;
+      if (!loaded || !this.insightPageId) {
+        // Keep trying only while we know there is something to wait for.
+        if (hadPending) {
+          this._aiPollTimer = setTimeout(poll, 3000);
+        } else {
+          this._aiPollTimer = null;
+        }
+        return;
       }
-    }, 3000);
+      const hasPending = this.comments.some(
+        (c) => c.is_ai && c.ai_status === 'pending'
+      );
+      if (!hasPending) {
+        this._aiPollTimer = null;
+        return;
+      }
+      this._aiPollTimer = setTimeout(poll, 3000);
+    };
+    this._aiPollTimer = setTimeout(poll, 3000);
   },
 
   async applyAiComment(id) {
@@ -1240,6 +1327,7 @@ export const comments = {
 
   async regenerateAiComment(id, event) {
     if (event) event.stopPropagation();
+    if (!confirm('确定要重新生成这条 AI 回复吗？')) return;
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (this.authToken) headers['Authorization'] = 'Bearer ' + this.authToken;
@@ -1255,9 +1343,19 @@ export const comments = {
   },
 
   onCommentCardClick(id) {
+    // Toggle active class via direct DOM manipulation instead of
+    // triggering a full re-render just to change a CSS class.
+    const list = document.getElementById('commentsList');
+    if (list) {
+      const oldActive = list.querySelector('.comment-card.active');
+      if (oldActive) oldActive.classList.remove('active');
+    }
     this.activeCommentId = id;
     this.updateHighlightActive();
-    this.renderComments();
+    if (list) {
+      const newActive = list.querySelector('.comment-card[data-comment-id="' + id + '"]');
+      if (newActive) newActive.classList.add('active');
+    }
     this.scrollToHighlight(id);
   },
 
@@ -1285,6 +1383,282 @@ export const comments = {
     const card = document.querySelector('.comment-card[data-comment-id="' + id + '"]');
     if (card) {
       card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  },
+
+  // --- Incremental rendering helpers ---
+
+  /// Toggle the `.active` class on comment cards to match `activeCommentId`,
+  /// without triggering a full DOM rebuild.
+  _updateActiveCommentClass() {
+    const list = document.getElementById('commentsList');
+    if (!list) return;
+    const oldActive = list.querySelector('.comment-card.active');
+    if (oldActive && parseInt(oldActive.dataset.commentId, 10) !== this.activeCommentId) {
+      oldActive.classList.remove('active');
+    }
+    if (this.activeCommentId != null) {
+      const newActive = list.querySelector('.comment-card[data-comment-id="' + this.activeCommentId + '"]');
+      if (newActive) newActive.classList.add('active');
+    }
+  },
+
+  /// Save the state of any active textarea inputs (reply forms) so they can
+  /// be restored after an incremental DOM update.
+  _saveActiveForms() {
+    const forms = {};
+    document.querySelectorAll('.reply-form-area textarea').forEach(ta => {
+      const area = ta.closest('.reply-form-area');
+      if (area && area.id && ta.value) {
+        const commentId = area.id.replace('replyFormArea', '');
+        forms['reply_' + commentId] = {
+          value: ta.value,
+          selectionStart: ta.selectionStart,
+          selectionEnd: ta.selectionEnd,
+          commentId: commentId,
+        };
+      }
+    });
+    return forms;
+  },
+
+  /// Restore previously saved form state after a DOM update.
+  _restoreActiveForms(saved) {
+    if (!saved || Object.keys(saved).length === 0) return;
+    for (const [, data] of Object.entries(saved)) {
+      if (!data.commentId) continue;
+      const commentId = data.commentId;
+      const area = document.getElementById('replyFormArea' + commentId);
+      if (!area) continue;
+      area.dataset.visible = 'true';
+      area.innerHTML =
+        '<div class="reply-form" onclick="event.stopPropagation()">' +
+        '<textarea id="replyInput' + commentId + '" placeholder="输入回复... 以 @AGENT 开头继续向 AGENT 提问" rows="2">' + this.escape(data.value) + '</textarea>' +
+        '<div class="reply-form-actions">' +
+        '<button onclick="app.hideReplyForm(' + commentId + ')">取消</button>' +
+        '<button class="primary" onclick="app.submitReply(' + commentId + ')">提交</button>' +
+        '</div></div>';
+      const ta = document.getElementById('replyInput' + commentId);
+      if (ta && data.selectionStart != null) {
+        ta.setSelectionRange(data.selectionStart, data.selectionEnd || data.selectionStart);
+      }
+    }
+  },
+
+  /// Render a reply with CSS-line-clamp truncation and an expand action.
+  /// All replies use the same structure: short (CSS-clamped to 1 line) +
+  /// full (hidden) + actions.  The expand button is hidden by default and
+  /// revealed by `_revealExpandButtons` after render if the content overflows.
+  /// `options.suffix` creates unique IDs when the same comment needs multiple
+  /// expandable regions (e.g. user prompt + AI reply on an AI annotation).
+  _renderExpandableReply(text, id, isAi, options = {}) {
+    const suffix = options.suffix || '';
+    const extraClass = options.className || '';
+    const isMd = isAi && this.isMarkdown(text);
+    const usedTool = isAi && !!(this.comments.find(c => c.id === id)?.ai_old_text);
+    const aiStatus = options.aiStatus || '';
+    const regenerateBtn = isAi && aiStatus !== 'applied' && this.authenticated
+      ? '<button class="comment-expand-regenerate-btn" onclick="event.stopPropagation();app.regenerateAiComment(' + id + ', event)" title="重新生成"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></button>'
+      : '';
+
+    // AI markdown / non-tool replies use the modal viewer for full content;
+    // plain text uses an inline toggle.  The primary action icon is placed
+    // before the regenerate icon so both sit at the end of the single-line row.
+    const usesModalViewer = isAi && (!usedTool || isMd);
+    const expandAction = usesModalViewer
+      ? '<button class="comment-expand-btn view-full-reply-btn" onclick="event.stopPropagation();app.showReplyModal(' + id + ', event)" title="查看完整回复">查看完整回复</button>'
+      : '<button class="comment-expand-btn" id="commentExpandToggle' + id + suffix + '" onclick="event.stopPropagation();app.toggleExpandReply(' + id + ', \'" + suffix + "\')" title="展开">&#9660;</button>';
+
+    // Full text is always present (hidden).  For the modal path it is
+    // invisible but needed by showReplyModal; for the toggle path it is
+    // swapped in by toggleExpandReply.
+    const fullId = 'commentExpandFull' + id + suffix;
+    const shortId = 'commentExpandShort' + id + suffix;
+
+    const viewFullClass = usesModalViewer ? ' has-view-full' : '';
+    return '<div class="comment-expand-reply' + viewFullClass + (extraClass ? ' ' + extraClass : '') + '">'
+      + (usesModalViewer ? '' : '<div class="comment-expand-actions">' + expandAction + '</div>')
+      + '<div class="comment-expand-short" id="' + shortId + '">' + this.escape(text) + '</div>'
+      + '<div class="comment-expand-full" id="' + fullId + '" style="display:none">' + this.escape(text) + '</div>'
+      + (usesModalViewer ? '<div class="view-full-reply-row">' + expandAction + '</div>' : '')
+      + (regenerateBtn ? '<div class="comment-expand-actions regenerate-actions">' + regenerateBtn + '</div>' : '')
+      + '</div>';
+  },
+
+  /// After rendering, hide expand/collapse buttons whose short text
+  /// does not actually overflow the 1-line CSS clamp.  This avoids
+  /// showing "展开" on replies that fit within 1 line.
+  _revealExpandButtons() {
+    const cards = document.querySelectorAll('.comment-expand-reply');
+    for (const card of cards) {
+      const short = card.querySelector('.comment-expand-short');
+      const actions = card.querySelector('.comment-expand-actions');
+      if (!short || !actions) continue;
+      // If the clamped text overflows, show the actions; otherwise hide.
+      const overflows = short.scrollHeight > short.clientHeight + 2;
+      actions.style.display = overflows ? '' : 'none';
+      // If not overflowing, also hide the full-text div
+      if (!overflows) {
+        const full = card.querySelector('.comment-expand-full');
+        if (full) full.style.display = 'none';
+      }
+    }
+  },
+
+  /// Toggle between short and full text in an expandable reply.
+  toggleExpandReply(id, suffix = '') {
+    const short = document.getElementById('commentExpandShort' + id + suffix);
+    const full = document.getElementById('commentExpandFull' + id + suffix);
+    const btn = document.getElementById('commentExpandToggle' + id + suffix);
+    if (!short || !full || !btn) return;
+    if (full.style.display === 'none') {
+      full.style.display = '';
+      short.style.display = 'none';
+      btn.innerHTML = '&#9650;';
+      btn.title = '收起';
+    } else {
+      full.style.display = 'none';
+      short.style.display = '';
+      btn.innerHTML = '&#9660;';
+      btn.title = '展开';
+    }
+  },
+
+  /// Render a single comment card (with nested replies) as an HTML string.
+  /// Extracted from the old `renderCard` closure for reuse in incremental updates.
+  _renderCommentCard(c, childrenMap, lastId) {
+    const isLast = lastId === c.id;
+    const isAi = c.is_ai;
+    const aiStatus = c.ai_status || '';
+    let bodyHtml = '';
+    let actionHtml = '';
+
+    if (isAi) {
+      bodyHtml = this._renderExpandableReply(c.comment, c.id, false, { suffix: 'Prompt', className: 'ai-prompt-expand' });
+      if (aiStatus === 'pending') {
+        bodyHtml += '<div class="ai-comment-status"><span class="ai-spinner"></span>处理中...</div>';
+      } else if (aiStatus === 'completed' || aiStatus === 'applied' || aiStatus === 'rejected') {
+        if (c.ai_reply) {
+          bodyHtml += this._renderExpandableReply(c.ai_reply, c.id, true, { aiStatus });
+        }
+        if (aiStatus === 'completed' && c.ai_old_text && c.ai_new_text) {
+          actionHtml = '<div class="ai-comment-actions">' +
+            '<button class="btn-primary" onclick="event.stopPropagation();app.applyAiComment(' + c.id + ')">接受</button>' +
+            '<button class="btn-secondary" onclick="event.stopPropagation();app.rejectAiComment(' + c.id + ')">取消</button>' +
+            '</div>';
+        } else if (aiStatus === 'applied') {
+          actionHtml = '<div class="ai-comment-status-tag applied">已接受</div>';
+        } else if (aiStatus === 'rejected') {
+          actionHtml = '<div class="ai-comment-status-tag rejected">已拒绝</div>';
+        }
+      } else if (aiStatus === 'failed') {
+        bodyHtml += '<div class="ai-comment-status error">AI 处理失败</div>';
+      }
+    } else {
+      // Regular comment: use expandable structure so CSS clamp + reveal
+      // handles truncation for any text length.
+      bodyHtml = this._renderExpandableReply(c.comment, c.id, false);
+    }
+
+    const replyBtn = this.authenticated
+      ? '<button class="reply-btn" onclick="event.stopPropagation();app.showReplyForm(' + c.id + ')" title="回复">回复</button>'
+      : '';
+
+    let html = '<div class="comment-card ' + (isAi ? 'ai-comment ' : '') + (this.activeCommentId === c.id ? 'active ' : '') + (isLast ? ' anim-enter' : '') + '" data-comment-id="' + c.id + '" onclick="app.onCommentCardClick(' + c.id + ')" onmouseenter="app.onCommentCardHover(' + c.id + ')" onmouseleave="app.onCommentCardLeave()">' +
+      (c.parent_id ? '' : (this.isImageQuote(c.quote) ? '<div class="comment-card-image"><img src="' + this.escape(c.quote) + '" loading="lazy"></div>' : '<div class="comment-card-quote">' + this.escape(c.quote) + '</div>')) +
+      bodyHtml + actionHtml +
+      '<div class="comment-card-meta"><span>' + this.formatShortDate(c.created_at) + '</span><div class="comment-card-meta-actions">' + replyBtn + (this.authenticated ? '<button class="delete-btn" onclick="event.stopPropagation();app.deleteComment(' + c.id + ')" title="删除">删除</button>' : '') + '</div></div>' +
+      '<div class="reply-form-area" id="replyFormArea' + c.id + '"></div>';
+
+    const children = childrenMap.get(c.id);
+    if (children) {
+      html += '<div class="comment-replies">';
+      for (const child of children) {
+        html += this._renderCommentCard(child, childrenMap, lastId);
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  },
+
+  /// Compute a fingerprint string for a root comment and its children,
+  /// used to decide whether an incremental update is needed.
+  _computeGroupFingerprint(rootComment, childrenMap) {
+    const parts = [rootComment.id + ':' + rootComment.ai_status + ':' + (rootComment.ai_status === 'pending' ? 'P' : (rootComment.ai_reply ? rootComment.ai_reply.length : 0))];
+    const children = childrenMap.get(rootComment.id) || [];
+    for (const ch of children) {
+      parts.push(ch.id + ':' + ch.ai_status + ':' + (ch.ai_status === 'pending' ? 'P' : (ch.ai_reply ? ch.ai_reply.length : 0)));
+    }
+    return parts.join('|') + ':' + !!this.authenticated;
+  },
+
+  /// Incrementally update the comment list: only rebuild cards whose
+  /// fingerprint changed, keeping unchanged cards (and their interactive
+  /// state) in place.  This prevents the 3-second polling refresh from
+  /// causing visual flicker or destroying in-progress form inputs.
+  _incrementalUpdateComments(list, roots, childrenMap, newGroupFps, lastId) {
+    const rootIds = new Set(roots.map(c => c.id));
+
+    // Map existing root cards by their comment ID
+    const existingRoots = new Map();
+    for (const el of list.querySelectorAll(':scope > .comment-card')) {
+      const id = parseInt(el.dataset.commentId, 10);
+      if (!isNaN(id)) existingRoots.set(id, el);
+    }
+
+    // Remove cards for deleted comments
+    for (const [id, el] of existingRoots) {
+      if (!rootIds.has(id)) {
+        el.remove();
+      }
+    }
+
+    // Update or insert cards in order
+    for (let i = 0; i < roots.length; i++) {
+      const c = roots[i];
+      const newFp = newGroupFps.get(c.id);
+      const oldFp = this._commentFingerprints ? this._commentFingerprints.get(c.id) : undefined;
+      const existingEl = existingRoots.get(c.id);
+
+      if (existingEl && oldFp === newFp) {
+        // Unchanged — just fix the active class
+        if (this.activeCommentId === c.id) {
+          existingEl.classList.add('active');
+        } else {
+          existingEl.classList.remove('active');
+        }
+        continue;
+      }
+
+      // Changed or new — rebuild this group
+      const newHtml = this._renderCommentCard(c, childrenMap, lastId);
+      const temp = document.createElement('div');
+      temp.innerHTML = newHtml;
+      const newEl = temp.firstElementChild;
+
+      if (existingEl) {
+        existingEl.replaceWith(newEl);
+      } else {
+        // Insert at correct position (before the next existing sibling)
+        let insertBefore = null;
+        for (let j = i + 1; j < roots.length; j++) {
+          const nextExisting = existingRoots.get(roots[j].id);
+          if (nextExisting && nextExisting.parentNode === list) {
+            insertBefore = nextExisting;
+            break;
+          }
+        }
+        if (insertBefore) {
+          list.insertBefore(newEl, insertBefore);
+        } else {
+          list.appendChild(newEl);
+        }
+      }
+    }
+
+    if (lastId !== null) {
+      setTimeout(() => { this.lastAddedCommentId = null; }, 500);
     }
   },
 };

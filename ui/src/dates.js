@@ -146,7 +146,7 @@ export const dates = {
     }
     const html = papers.map(p => {
       const scoreClass = p.score >= 7 ? 'score-high' : p.score >= 4 ? 'score-mid' : 'score-low';
-      const abstract = (p.abstract || '').substring(0, 200) + ((p.abstract || '').length > 200 ? '...' : '');
+      const abstract = (p.abstract_zh || '').substring(0, 200) + ((p.abstract_zh || '').length > 200 ? '...' : '');
       const authors = p.authors.length > 2 ? p.authors.slice(0, 2).join(', ') + ' 等' : p.authors.join(', ');
       const markMap = { critical: '关键', supporting: '参考', marginal: '边缘' };
       const markColor = { critical: '#c75b39', supporting: '#4a7c59', marginal: '#8c7b40' };

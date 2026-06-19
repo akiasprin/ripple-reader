@@ -85,7 +85,7 @@ fn push_paper_filters<'a>(
         builder.push_bind(pattern.clone());
         builder.push(" OR p.summary ILIKE ");
         builder.push_bind(pattern.clone());
-        builder.push(" OR p.abstract ILIKE ");
+        builder.push(" OR p.abstract_zh ILIKE ");
         builder.push_bind(pattern.clone());
         builder.push(" OR p.authors::text ILIKE ");
         builder.push_bind(pattern.clone());
@@ -105,7 +105,7 @@ impl Db {
     pub async fn get_paper(&self, id: &str) -> Result<Option<DbPaper>> {
         let row = sqlx::query(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type,
-                    p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id,
+                    p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id,
                     pi.insight, pi.processed_at as insight_processed_at,
                     pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at
              FROM papers p
@@ -130,8 +130,8 @@ impl Db {
             .context("Failed to begin transaction")?;
 
         sqlx::query(
-            "INSERT INTO papers (id, title, authors, published, score, paper_type, summary, abstract, processed_at, source_type, source_url, external_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "INSERT INTO papers (id, title, authors, published, score, paper_type, summary, abstract_zh, abstract_en, processed_at, source_type, source_url, external_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (id) DO UPDATE SET
                title = EXCLUDED.title,
                authors = EXCLUDED.authors,
@@ -139,7 +139,8 @@ impl Db {
                score = EXCLUDED.score,
                paper_type = EXCLUDED.paper_type,
                summary = EXCLUDED.summary,
-               abstract = EXCLUDED.abstract,
+               abstract_zh = EXCLUDED.abstract_zh,
+               abstract_en = EXCLUDED.abstract_en,
                processed_at = EXCLUDED.processed_at,
                source_type = EXCLUDED.source_type,
                source_url = EXCLUDED.source_url,
@@ -152,7 +153,8 @@ impl Db {
         .bind(paper.score)
         .bind(&paper.paper_type)
         .bind(&paper.summary)
-        .bind(&paper.r#abstract)
+        .bind(&paper.abstract_zh)
+        .bind(&paper.abstract_en)
         .bind(paper.processed_at)
         .bind(&paper.source_type)
         .bind(&paper.source_url)
@@ -209,7 +211,7 @@ impl Db {
     ) -> Result<Vec<DbPaper>> {
         let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.insight, pi.processed_at as insight_processed_at, \
              pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
              FROM papers p \
@@ -278,7 +280,7 @@ impl Db {
             builder.push_bind(pattern.clone());
             builder.push(" OR p.summary ILIKE ");
             builder.push_bind(pattern.clone());
-            builder.push(" OR p.abstract ILIKE ");
+            builder.push(" OR p.abstract_zh ILIKE ");
             builder.push_bind(pattern.clone());
             builder.push(" OR p.authors::text ILIKE ");
             builder.push_bind(pattern.clone());
@@ -333,7 +335,7 @@ impl Db {
     ) -> Result<Vec<super::types::DbPaperListItem>> {
         let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.processed_at as insight_processed_at, \
              pi.reviewed_at as insight_reviewed_at, pi.checked_at, \
              pi.insight = '__ANALYZING__' as is_analyzing, \
@@ -386,7 +388,7 @@ impl Db {
         }
         let rows = sqlx::query(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.insight, pi.processed_at as insight_processed_at, \
              pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
              FROM papers p \
@@ -444,7 +446,7 @@ impl Db {
     pub async fn list_papers_without_marks(&self) -> Result<Vec<DbPaper>> {
         let rows = sqlx::query(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.insight, pi.processed_at as insight_processed_at, \
              pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
              FROM papers p \
@@ -478,7 +480,7 @@ impl Db {
     pub async fn list_analyzing_papers(&self) -> Result<Vec<DbPaper>> {
         let rows = sqlx::query(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.insight, pi.processed_at as insight_processed_at, \
              pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
              FROM papers p \
@@ -498,7 +500,7 @@ impl Db {
     pub async fn list_reviewing_papers(&self) -> Result<Vec<DbPaper>> {
         let rows = sqlx::query(
             "SELECT p.id, p.title, p.authors, p.published, p.score, p.paper_type, \
-             p.summary, p.abstract, p.processed_at, p.source_type, p.source_url, p.external_id, \
+             p.summary, p.abstract_zh, p.abstract_en, p.processed_at, p.source_type, p.source_url, p.external_id, \
              pi.insight, pi.processed_at as insight_processed_at, \
              pi.review as insight_review, pi.reviewed_at as insight_reviewed_at, pi.checked_at \
              FROM papers p \
@@ -547,11 +549,18 @@ impl Db {
             paper_builder.push("summary = ").push_bind(summary);
             has_paper = true;
         }
-        if let Some(abstract_) = &updates.r#abstract {
+        if let Some(abstract_zh) = &updates.abstract_zh {
             if has_paper {
                 paper_builder.push(", ");
             }
-            paper_builder.push("abstract = ").push_bind(abstract_);
+            paper_builder.push("abstract_zh = ").push_bind(abstract_zh);
+            has_paper = true;
+        }
+        if let Some(abstract_en) = &updates.abstract_en {
+            if has_paper {
+                paper_builder.push(", ");
+            }
+            paper_builder.push("abstract_en = ").push_bind(abstract_en);
             has_paper = true;
         }
 

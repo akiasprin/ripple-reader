@@ -20,3 +20,4 @@
 AGENTS.md
 Cargo.lock
 .gstack/
+/snapshots/

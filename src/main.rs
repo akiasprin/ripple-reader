@@ -51,9 +51,6 @@ enum SubCmd {
         /// Re-process all untagged papers from database
         #[arg(long)]
         force_all: bool,
-        /// Re-summarize all papers (preserve existing insights)
-        #[arg(long)]
-        resummarize_all: bool,
     },
     /// Physically delete soft-deleted papers
     CleanupDeleted,
@@ -152,8 +149,7 @@ impl log::Log for FileLogger {
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let is_web = args.len() <= 1
-        || args.get(1).map(|s| s.as_str()) == Some("web");
+    let is_web = args.len() <= 1 || args.get(1).map(|s| s.as_str()) == Some("web");
     let multi = if is_web {
         std::fs::create_dir_all("logs").ok();
         let file_appender = tracing_appender::rolling::daily("logs", "run.log");
@@ -195,6 +191,13 @@ async fn main() -> Result<()> {
             let mut insight_processors = Vec::new();
             let mut comment_processor = None;
             for provider in &cfg.insight_providers {
+                if !provider.enabled {
+                    info!(
+                        "[main] Skipping disabled insight provider '{}'",
+                        provider.name
+                    );
+                    continue;
+                }
                 let processor = Processor::new(
                     ripple_reader::processor::ProviderType::parse(&provider.provider_type),
                     provider.name.clone(),
@@ -204,8 +207,9 @@ async fn main() -> Result<()> {
                     provider.max_tokens,
                     provider.reasoning_effort.clone(),
                     provider.output_config_effort.clone(),
-                    None,
                     provider.user_agent.clone(),
+                    provider.temperature,
+                    provider.top_p,
                     cfg.llm_max_workers,
                     cfg.insight_max_workers,
                     cfg.llm_max_retries,
@@ -229,6 +233,7 @@ async fn main() -> Result<()> {
                 arxiv_query: cfg.arxiv_query.clone(),
                 arxiv_max_results: cfg.arxiv_max_results,
                 arxiv_page_size: cfg.arxiv_page_size,
+                arxiv_cache_ttl_hours: cfg.arxiv_cache_ttl_hours,
                 llm_max_workers: cfg.llm_max_workers,
                 llm_max_retries: cfg.llm_max_retries,
                 pdf_max_workers: cfg.pdf_max_workers,
@@ -263,26 +268,9 @@ async fn main() -> Result<()> {
             ids,
             force,
             force_all,
-            resummarize_all,
         } => {
             let cfg = Config::from_env()?;
             print_config(&cfg);
-            if resummarize_all {
-                info!("[main] Resummarize-all mode: re-summarizing ALL papers");
-                let db = Db::new(&cfg.database_url)
-                    .await
-                    .context("Failed to initialize database")?;
-                let ids = db
-                    .list_all_paper_ids()
-                    .await
-                    .context("Failed to list paper ids from database")?;
-                info!("[main] Found {} papers to re-summarize", ids.len());
-                if ids.is_empty() {
-                    eprintln!("No papers found in database.");
-                    std::process::exit(1);
-                }
-                return add_papers(&ids, &cfg, true, multi.as_ref(), true).await;
-            }
             if force_all {
                 info!("[main] Force-all mode: re-summarizing all untagged papers");
                 let db = Db::new(&cfg.database_url)
@@ -292,10 +280,7 @@ async fn main() -> Result<()> {
                     .list_paper_ids_without_tags()
                     .await
                     .context("Failed to list paper ids from database")?;
-                info!(
-                    "[main] Found {} untagged papers to re-process",
-                    ids.len()
-                );
+                info!("[main] Found {} untagged papers to re-process", ids.len());
                 if ids.is_empty() {
                     eprintln!("No papers found in database.");
                     std::process::exit(1);
@@ -305,13 +290,10 @@ async fn main() -> Result<()> {
             if ids.is_empty() {
                 eprintln!("Usage: cargo run -- add [--force] <id1> [id2] ...");
                 eprintln!("       cargo run -- add --force-all");
-                eprintln!("       cargo run -- add --resummarize-all");
                 std::process::exit(1);
             }
             if force {
-                info!(
-                    "[main] Force refresh: re-summarize all specified papers"
-                );
+                info!("[main] Force refresh: re-summarize all specified papers");
             }
             add_papers(&ids, &cfg, force, multi.as_ref(), false).await
         }
@@ -347,18 +329,13 @@ async fn main() -> Result<()> {
                 Some(q) => q,
                 None => {
                     let cfg = Config::from_env()?;
-                    build_query(
-                        &cfg.arxiv_query,
-                        &cfg.arxiv_categories,
-                        &cfg.arxiv_keywords,
-                    )
+                    build_query(&cfg.arxiv_query, &cfg.arxiv_categories, &cfg.arxiv_keywords)
                 }
             };
             println!("Fetching papers from arXiv with query: {}", q);
             let papers = fetch_papers(&q, max_results, 1000).await?;
             println!("Fetched {} papers, extracting authors...", papers.len());
-            let mut authors: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut authors: std::collections::HashSet<String> = std::collections::HashSet::new();
             for paper in &papers {
                 for author in &paper.authors {
                     let author = author.trim();
@@ -400,10 +377,7 @@ async fn main() -> Result<()> {
             let mut enriched = 0usize;
             let mut failed = 0usize;
             for author in &authors {
-                match ripple_reader::author_reputation::fetch_author_semantic_scholar(
-                    author,
-                )
-                .await
+                match ripple_reader::author_reputation::fetch_author_semantic_scholar(author).await
                 {
                     Ok(Some(data)) => {
                         if let Err(e) = db
@@ -496,10 +470,7 @@ async fn main() -> Result<()> {
             let mut enriched = 0usize;
             let mut failed = 0usize;
             for author in &authors {
-                match ripple_reader::author_reputation::fetch_author_semantic_scholar(
-                    author,
-                )
-                .await
+                match ripple_reader::author_reputation::fetch_author_semantic_scholar(author).await
                 {
                     Ok(Some(data)) => {
                         if let Err(e) = db
@@ -523,10 +494,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     Ok(None) => {
-                        warn!(
-                            "[enrich-authors] No Semantic Scholar match for {}",
-                            author
-                        );
+                        warn!("[enrich-authors] No Semantic Scholar match for {}", author);
                         failed += 1;
                     }
                     Err(e) => {
@@ -590,6 +558,10 @@ async fn run_once(cfg: &Config, multi: Option<&MultiProgress>) -> Result<()> {
     fetch_pb.finish_with_message(format!("Fetched {} papers from arXiv", papers.len()));
     info!("[main] Fetched {} papers from arXiv", papers.len());
 
+    // Reverse so oldest papers are processed first (arXiv returns newest-first).
+    let mut papers = papers;
+    papers.reverse();
+
     if papers.is_empty() {
         warn!("[main] No papers to output.");
         return Ok(());
@@ -617,8 +589,9 @@ async fn run_once(cfg: &Config, multi: Option<&MultiProgress>) -> Result<()> {
         summarizer.max_tokens,
         summarizer.reasoning_effort.clone(),
         summarizer.output_config_effort.clone(),
-        None,
         summarizer.user_agent.clone(),
+        summarizer.temperature,
+        summarizer.top_p,
         cfg.llm_max_workers,
         cfg.insight_max_workers,
         cfg.llm_max_retries,
@@ -711,7 +684,7 @@ async fn run_once(cfg: &Config, multi: Option<&MultiProgress>) -> Result<()> {
         let paper = paper.clone();
         tasks.push(async move {
             let _db_permit = db_sem.acquire().await.unwrap();
-            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, false).await;
+            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, false, false).await;
             (paper, res)
         });
     }
@@ -838,8 +811,10 @@ async fn add_papers(
 ) -> Result<()> {
     info!("[main] Custom add mode, ids={:?}", ids);
 
-    let (arxiv_ids, or_ids): (Vec<String>, Vec<String>) =
+    let (mut arxiv_ids, mut or_ids): (Vec<String>, Vec<String>) =
         ids.iter().cloned().partition(|id| is_arxiv_id(id));
+    arxiv_ids.sort();
+    or_ids.sort();
 
     let total_ids = arxiv_ids.len() + or_ids.len();
 
@@ -948,8 +923,9 @@ async fn add_papers(
         summarizer.max_tokens,
         summarizer.reasoning_effort.clone(),
         summarizer.output_config_effort.clone(),
-        None,
         summarizer.user_agent.clone(),
+        summarizer.temperature,
+        summarizer.top_p,
         cfg.llm_max_workers,
         cfg.insight_max_workers,
         cfg.llm_max_retries,
@@ -1026,7 +1002,7 @@ async fn add_papers(
                         let db_ref = &db;
                         let pdf_sem = Arc::clone(&pdf_semaphore);
                         tasks.push(async move {
-                            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, force_refresh).await;
+                            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, force_refresh, true).await;
                             (paper, res)
                         });
                     }
@@ -1173,8 +1149,9 @@ async fn add_openreview_papers(
         summarizer.max_tokens,
         summarizer.reasoning_effort.clone(),
         summarizer.output_config_effort.clone(),
-        None,
         summarizer.user_agent.clone(),
+        summarizer.temperature,
+        summarizer.top_p,
         cfg.llm_max_workers,
         cfg.insight_max_workers,
         cfg.llm_max_retries,
@@ -1206,7 +1183,7 @@ async fn add_openreview_papers(
         let pdf_sem = Arc::clone(&pdf_semaphore);
         let paper = paper.clone();
         tasks.push(async move {
-            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, false).await;
+            let res = process_paper_with_cache(s, db_ref, &paper, &pdf_sem, false, false).await;
             (paper, res)
         });
     }

@@ -3,7 +3,40 @@
 pub mod parser;
 
 use crate::mdfmt::parser::{has_layout, parse_images, rebuild_image};
+use crate::mineru::LayoutDoc;
+use std::io::Read as IoRead;
 use std::path::{Path, PathBuf};
+
+/// Read the first page width from `layout.json` inside a `mineru.zip`, converting
+/// PDF points to pixels.
+///
+/// Uses the standard PDF conversion: `px = pt * dpi / 72`.  Callers should
+/// pass `600` for DPI to match the hires figure rendering pipeline.
+/// Returns `None` if the zip is missing, `layout.json` cannot be parsed, or
+/// `page_size` is empty for the first page.
+pub fn page_width_from_layout(zip_path: &Path, dpi: u32) -> Option<f64> {
+    let file = std::fs::File::open(zip_path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut buf = String::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).ok()?;
+        if entry.name().ends_with("layout.json") {
+            entry.read_to_string(&mut buf).ok()?;
+            break;
+        }
+    }
+    if buf.is_empty() {
+        return None;
+    }
+    let doc: LayoutDoc = serde_json::from_str(&buf).ok()?;
+    let first_page = doc.pdf_info.first()?;
+    if first_page.page_size.len() >= 2 {
+        let width_pt = first_page.page_size[0] as f64;
+        Some(width_pt * dpi as f64 / 72.0)
+    } else {
+        None
+    }
+}
 
 /// Try to locate the actual image file on disk for a given paper.
 ///
@@ -69,7 +102,12 @@ pub struct Layout {
 /// - All other images: `display_pct = clamp(page_ratio * 120, 50, 95)`,
 ///   where `page_ratio = image_width / page_width`.  Images at or below
 ///   50% are right-floated; wider images are centered.
-pub fn decide_layout(width: u32, height: u32, is_table: bool, page_width_px: f64) -> Option<Layout> {
+pub fn decide_layout(
+    width: u32,
+    height: u32,
+    is_table: bool,
+    page_width_px: f64,
+) -> Option<Layout> {
     let aspect = width as f64 / height.max(1) as f64;
 
     // Very wide images: shrinking ruins horizontal readability.
@@ -130,8 +168,15 @@ pub enum Decision {
 /// Transform markdown: apply smart layout to images.
 ///
 /// When `force` is true, existing layouts are overwritten.
+/// When `page_width_px` is provided, it is used as the reference page width;
+/// otherwise the width is estimated from `page://` images on disk.
 /// Returns (new_markdown, list of per-image results).
-pub fn transform(paper_id: &str, markdown: &str, force: bool) -> (String, Vec<ImageResult>) {
+pub fn transform(
+    paper_id: &str,
+    markdown: &str,
+    force: bool,
+    page_width_px: Option<f64>,
+) -> (String, Vec<ImageResult>) {
     let images = parse_images(markdown);
     let mut results = Vec::with_capacity(images.len());
 
@@ -140,24 +185,26 @@ pub fn transform(paper_id: &str, markdown: &str, force: bool) -> (String, Vec<Im
         return (markdown.to_string(), results);
     }
 
-    // Estimate the page width in pixels.  Use a page:// image as the
-    // ground-truth if available; otherwise fall back to the widest image
-    // (which is typically close to full-page width in academic papers).
-    let page_width_px = images
-        .iter()
-        .find(|img| img.url.starts_with("page://"))
-        .and_then(|img| resolve_image_path(paper_id, &img.url))
-        .and_then(|path| image_dimensions(&path))
-        .map(|(w, _)| w as f64)
-        .unwrap_or_else(|| {
-            images
-                .iter()
-                .filter_map(|img| resolve_image_path(paper_id, &img.url))
-                .filter_map(|path| image_dimensions(&path))
-                .map(|(w, _)| w as f64)
-                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap_or(3000.0)
-        });
+    // Determine the page width in pixels.  When the caller supplies a value
+    // (typically from layout.json), use it directly; otherwise estimate from
+    // page:// images on disk as a fallback.
+    let page_width_px = page_width_px.filter(|&w| w > 0.0).unwrap_or_else(|| {
+        images
+            .iter()
+            .find(|img| img.url.starts_with("page://"))
+            .and_then(|img| resolve_image_path(paper_id, &img.url))
+            .and_then(|path| image_dimensions(&path))
+            .map(|(w, _)| w as f64)
+            .unwrap_or_else(|| {
+                images
+                    .iter()
+                    .filter_map(|img| resolve_image_path(paper_id, &img.url))
+                    .filter_map(|path| image_dimensions(&path))
+                    .map(|(w, _)| w as f64)
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or(3000.0)
+            })
+    });
 
     let mut output = String::with_capacity(markdown.len() + images.len() * 20);
     let mut last_end = 0usize;
@@ -210,7 +257,8 @@ pub fn transform(paper_id: &str, markdown: &str, force: bool) -> (String, Vec<Im
                                     new_width: layout.width.clone(),
                                     new_align: layout.align.to_string(),
                                 };
-                                let repl = rebuild_image(&img, Some(&layout.width), Some(layout.align));
+                                let repl =
+                                    rebuild_image(&img, Some(&layout.width), Some(layout.align));
                                 (decision, repl)
                             }
                             None => {

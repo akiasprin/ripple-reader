@@ -290,15 +290,18 @@
   </div>
 </div>
 
-<div id="mobileCommentEditor" class="mobile-comment-editor">
-  <div class="mobile-comment-editor-header">
-    <button class="mobile-comment-editor-cancel" onclick="app.hideMobileCommentEditor()">取消</button>
-    <span class="mobile-comment-editor-title">添加批注</span>
-    <button class="mobile-comment-editor-submit" onclick="app.submitMobileComment()">提交</button>
+<div id="mobileCommentOverlay" class="mobile-comment-overlay">
+  <div id="mobileCommentEditor" class="mobile-comment-editor">
+    <div class="mobile-comment-editor-drag"><div class="mobile-comment-editor-drag-line"></div></div>
+    <div class="mobile-comment-editor-header">
+      <button class="mobile-comment-editor-cancel" onclick="app.hideMobileCommentEditor()">取消</button>
+      <span class="mobile-comment-editor-title">添加批注</span>
+      <button class="mobile-comment-editor-submit" onclick="app.submitMobileComment()">提交</button>
+    </div>
+    <div class="mobile-comment-editor-quote" id="mobileCommentEditorQuote"></div>
+    <textarea id="mobileCommentEditorInput" class="mobile-comment-editor-input" placeholder="输入批注内容..."></textarea>
+    <div class="mobile-comment-editor-hint">以 @AGENT 开头可向 AI 提问</div>
   </div>
-  <div class="mobile-comment-editor-quote" id="mobileCommentEditorQuote"></div>
-  <textarea id="mobileCommentEditorInput" class="mobile-comment-editor-input" placeholder="输入批注内容..." rows="6"></textarea>
-  <div class="mobile-comment-editor-hint">以 @AGENT 开头可向 AI 提问</div>
 </div>
 
 <div id="commentsToggleBtn" class="comments-bar" onclick="app.showCommentsPanel()" title="显示批注">

@@ -339,17 +339,30 @@ async fn update_paper(
         ))?;
 
     let updates = DbPaperUpdate {
-        title: req.title.as_ref().map(|s| crate::db::cleanup_text(s)),
+        title: req.title.as_ref().map(|s| crate::db::normalize_text(s)),
         score: req.score,
-        paper_type: req.paper_type.as_ref().map(|s| crate::db::cleanup_text(s)),
-        summary: req.summary.as_ref().map(|s| crate::db::cleanup_text(s)),
-        r#abstract: req.r#abstract.as_ref().map(|s| crate::db::cleanup_text(s)),
-        insight: req.insight.as_ref().map(|s| crate::db::cleanup_text(s)),
+        paper_type: req
+            .paper_type
+            .as_ref()
+            .map(|s| crate::db::normalize_text(s)),
+        summary: req
+            .summary
+            .as_ref()
+            .map(|s| crate::db::normalize_text_convert_quotes(s)),
+        abstract_zh: req
+            .abstract_zh
+            .as_ref()
+            .map(|s| crate::db::normalize_text_convert_quotes(s)),
+        abstract_en: req
+            .abstract_en
+            .as_ref()
+            .map(|s| crate::db::normalize_text_convert_quotes(s)),
+        insight: req.insight.as_ref().map(|s| crate::db::normalize_text(s)),
         insight_processed_at: None,
         insight_review: req
             .insight_review
             .as_ref()
-            .map(|s| crate::db::cleanup_text(s)),
+            .map(|s| crate::db::normalize_text(s)),
         insight_reviewed_at: None,
         checked_at: req.checked_at,
         clear_checked_at: false,
@@ -881,7 +894,7 @@ async fn list_papers_by_date(
             id: p.id,
             title: p.title,
             authors: p.authors,
-            r#abstract: p.r#abstract,
+            abstract_zh: p.abstract_zh,
             score: p.score,
             mark: p.mark,
             source_type: p.source_type,
@@ -1391,7 +1404,7 @@ pub async fn run_server(
                     let state_for_cleanup = Arc::clone(&state_clone);
                     let id = paper.id.clone();
                     let title = paper.title.clone();
-                    let abstract_text = paper.r#abstract.clone();
+                    let abstract_text = paper.abstract_zh.clone();
                     let stream_state_for_task = stream_state.clone();
                     let source = paper.source_type.clone();
                     let handle = tokio::spawn(async move {

@@ -235,7 +235,7 @@ impl Processor {
             "[processor] Insight analyze output length={} chars",
             content.len()
         );
-        let mut text = crate::db::cleanup_text(&content);
+        let mut text = crate::db::normalize_text(&content);
         text.push_str(&format!(
             "\n\n<div style=\"text-align:right; color:var(--text3); font-size:12px;\">（本文使用 {} 模型生成，内容仅供参考）</div>",
             self.provider_name
@@ -333,10 +333,47 @@ impl Processor {
             content: MessageContent::Text(system_prompt),
         });
         if has_history {
-            // Full paper text as grounding context before the conversation
+            // Multi-turn: re-render the grounding message with the instruction
+            // placeholder replaced by a reference to the conversation below.
+            // This avoids duplicating the current instruction in both the
+            // grounding message and the final Continue: follow-up, and
+            // prevents the current instruction from overwriting the original
+            // instruction's structural context in the template.
+            let tpl = self.revise_template.read().unwrap();
+            let user_tpl = tpl.user.clone();
+            drop(tpl);
+            let grounding = super::PromptTemplate::render(
+                &user_tpl,
+                &[
+                    ("full_text", full_text),
+                    ("selected", selected),
+                    ("before_ctx", before_ctx),
+                    ("after_ctx", after_ctx),
+                    ("instruction", "(see conversation below)"),
+                ],
+            );
+            let grounding_content = if image_base64.is_some() {
+                // Preserve image parts if present
+                match &user_content {
+                    MessageContent::Parts(parts) => {
+                        let mut new_parts = parts.clone();
+                        // Replace text part with grounding text
+                        for part in &mut new_parts {
+                            if part.content_type == "text" {
+                                part.text = Some(grounding);
+                                break;
+                            }
+                        }
+                        MessageContent::Parts(new_parts)
+                    }
+                    _ => MessageContent::Text(grounding),
+                }
+            } else {
+                MessageContent::Text(grounding)
+            };
             messages.push(Message {
                 role: "user".to_string(),
-                content: user_content.clone(),
+                content: grounding_content,
             });
         }
         for (role, content) in conversation_history {
@@ -346,10 +383,10 @@ impl Processor {
             });
         }
         if has_history {
-            // Prepend a brief reminder so the model treats this as a continuation
-            // rather than re-executing one-shot format instructions from earlier turns.
+            // The current instruction appears only here, not duplicated in
+            // the grounding message above.
             let followup = format!(
-                "Continue: {}. Do not repeat opening sentences about continuation.\n",
+                "{}. Please continue your reply based on the context.\n",
                 instruction
             );
             messages.push(Message {
@@ -396,7 +433,7 @@ impl Processor {
         let content = self
             .call_api("revise", messages, None, context.as_deref())
             .await?;
-        let text = crate::db::cleanup_text(&content);
+        let text = crate::db::normalize_text(&content);
 
         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(tool_calls) = json_val.get("tool_calls").and_then(|t| t.as_array()) {
@@ -541,7 +578,7 @@ impl Processor {
             "[processor] Insight analyze stream output length={} chars",
             content.len()
         );
-        let mut text = crate::db::cleanup_text(&content);
+        let mut text = crate::db::normalize_text(&content);
         text.push_str(&format!(
             "\n\n<div style=\"text-align:right; color:var(--text3); font-size:12px;\">（本文使用 {} 模型生成，内容仅供参考）</div>",
             self.provider_name
@@ -633,7 +670,7 @@ impl Processor {
             content.len()
         );
 
-        let cleaned = crate::db::cleanup_text(&content);
+        let cleaned = crate::db::normalize_text(&content);
         let qualified = Self::parse_qualified(&cleaned);
         let review_text = Self::strip_qualified_line(&cleaned);
         info!("[processor] Review qualified={} for '{}'", qualified, title);

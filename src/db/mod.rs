@@ -18,8 +18,9 @@ pub mod types;
 mod users;
 
 pub use types::{
-    cleanup_text, is_valid_insight, normalize_insight_heading, AuthorStats, DateTreeNode, DbPaper,
-    DbPaperListItem, DbPaperUpdate, InsightBackupRow, PaperByDate, PaperComment, TagsDashboard,
+    is_valid_insight, normalize_insight_heading, normalize_text, normalize_text_convert_quotes,
+    AuthorStats, DateTreeNode, DbPaper, DbPaperListItem, DbPaperUpdate, InsightBackupRow,
+    PaperByDate, PaperComment, TagsDashboard,
 };
 
 #[derive(Clone)]
@@ -63,7 +64,8 @@ impl Db {
             score: row.try_get("score")?,
             paper_type: row.try_get("paper_type")?,
             summary: row.try_get("summary")?,
-            r#abstract: row.try_get("abstract")?,
+            abstract_zh: row.try_get("abstract_zh")?,
+            abstract_en: row.try_get("abstract_en").unwrap_or_default(),
             processed_at: row.try_get("processed_at")?,
             insight: row.try_get("insight").unwrap_or_default(),
             insight_processed_at: row.try_get("insight_processed_at").ok(),
@@ -91,7 +93,7 @@ impl Db {
             score: row.try_get("score")?,
             paper_type: row.try_get("paper_type")?,
             summary: row.try_get("summary")?,
-            r#abstract: row.try_get("abstract")?,
+            abstract_zh: row.try_get("abstract_zh")?,
             processed_at: row.try_get("processed_at")?,
             insight_processed_at: row.try_get("insight_processed_at").ok(),
             insight_reviewed_at: row.try_get("insight_reviewed_at").ok(),

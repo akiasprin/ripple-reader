@@ -149,9 +149,14 @@ export const progress = {
     const bar = document.getElementById('progressBar');
     const lastCompletedAt = completedList.length > 0 ? completedList[0].processed_at : null;
     const isIdle = !hasAnalyzing && (!lastCompletedAt || Date.now() - lastCompletedAt > 60000);
+    // On mobile, when the comments panel is open the progress bar must stay
+    // hidden to avoid overlapping.  Without this guard the 5-second polling
+    // cycle re-adds .show and creates a state desync with the save/restore
+    // logic in showCommentsPanel/hideCommentsPanel.
+    const commentsPanelOpenOnMobile = this.commentsPanelOpen && !this.isDesktopViewport();
     if (this.progressCollapsed) {
       panel.classList.remove('show');
-      if (bar) {
+      if (bar && !commentsPanelOpenOnMobile) {
         bar.classList.add('show');
         if (hasAnalyzing) {
           bar.classList.remove('done', 'idle');
@@ -163,6 +168,8 @@ export const progress = {
           bar.classList.remove('pulsing', 'idle');
           bar.classList.add('done');
         }
+      } else if (bar) {
+        bar.classList.remove('show', 'pulsing', 'done', 'idle');
       }
     } else {
       panel.classList.add('show');
@@ -174,13 +181,13 @@ export const progress = {
   },
 
   toggleProgressCollapse() {
-    this.haptic('light');
     this.progressCollapsed = !this.progressCollapsed;
     const panel = document.getElementById('insightProgressPanel');
     const bar = document.getElementById('progressBar');
+    const commentsPanelOpenOnMobile = this.commentsPanelOpen && !this.isDesktopViewport();
     if (this.progressCollapsed) {
       if (panel) panel.classList.remove('show');
-      if (bar) bar.classList.add('show');
+      if (bar && !commentsPanelOpenOnMobile) bar.classList.add('show');
     } else {
       if (panel) panel.classList.add('show');
       if (bar) bar.classList.remove('show');

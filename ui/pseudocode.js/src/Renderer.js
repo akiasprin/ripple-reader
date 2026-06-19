@@ -759,7 +759,7 @@ Renderer.prototype._buildTree = function (node) {
             this._buildCommentsFromBlock(blockNode);
             this._buildTree(blockNode);
 
-            if (!this._options.noEnd) {
+            if (!this._options.noEnd && node.value.hasEnd) {
                 this._newLine();
                 this._typeKeyword(`end ${funcType}`);
             }
@@ -821,7 +821,7 @@ Renderer.prototype._buildTree = function (node) {
                 this._buildTree(elseBlock);
             }
 
-            if (!this._options.noEnd) {
+            if (!this._options.noEnd && node.value.hasEnd) {
                 // ENDIF
                 this._newLine();
                 this._typeKeyword('end if');
@@ -836,7 +836,8 @@ Renderer.prototype._buildTree = function (node) {
             //      <span class="ps-keyword">do</span>
             // </p>
             this._newLine();
-            var loopType = node.value;
+            var loopType = typeof node.value === 'string' ? node.value : node.value.type;
+            var hasEnd = typeof node.value === 'string' ? true : node.value.hasEnd;
             var displayLoopName = {
                 'for': 'for',
                 'forall': 'for all',
@@ -855,7 +856,7 @@ Renderer.prototype._buildTree = function (node) {
             this._buildCommentsFromBlock(block);
             this._buildTree(block);
 
-            if (!this._options.noEnd) {
+            if (!this._options.noEnd && hasEnd) {
                 // \ENDFOR or \ENDWHILE
                 // ==>
                 // <p class="ps-line">
@@ -910,7 +911,7 @@ Renderer.prototype._buildTree = function (node) {
             this._buildCommentsFromBlock(uponBlock);
             this._buildTree(uponBlock);
 
-            if (!this._options.noEnd) {
+            if (!this._options.noEnd && node.value.hasEnd) {
                 // ENDUPON
                 this._newLine();
                 this._typeKeyword('end upon');
